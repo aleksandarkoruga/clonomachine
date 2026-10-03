@@ -1,0 +1,20 @@
+# toolchains, python env and cloned LiteX repos (pinned in deps.lock, see README)
+/tools/
+/.venv/
+/deps/
+__pycache__/
+*.pyc
+
+# build outputs
+/build/
+/fw/*.o
+/fw/*.d
+/fw/*.bin
+/fw/*.elf
+/fw/*.map
+/fw/*.fbi
+/sim/obj_*/
+/model/test_vs_ugen
+/model/*.o
+*.vcd
+*.fst

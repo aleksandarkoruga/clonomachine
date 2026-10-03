@@ -1,0 +1,3 @@
+# ULX3S (FTDI FT231X): JTAG via libusb (openFPGALoader/fujprog) and the USB serial console
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6015", MODE="0666"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6015", MODE="0666"
