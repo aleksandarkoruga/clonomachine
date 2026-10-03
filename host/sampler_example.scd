@@ -76,6 +76,22 @@
 ~fpga.sendMsg("/slot/1/pvTransient", 0);  // phase vocoder without Bungee's transient handling
 ~fpga.sendMsg("/midi/cc", 10, 22, 127);   // CC22 >= 64: phase vocoder, < 64: grains (proposal)
 ~fpga.sendMsg("/slot/1/pos", 0.4); ~fpga.sendMsg("/slot/1/algo", 1); // pinned pos + PV = spectral freeze
+~fpga.sendMsg("/slot/1/pos", -1);         // unpin: the PV runs on from there
+// phase vocoder stretch: slow it down without the grain texture (the gate/stutter/notes work as usual)
+~fpga.sendMsg("/slot/1/algo", 1); ~fpga.sendMsg("/slot/1/rate", 0.25); ~fpga.sendMsg("/slot/1/pitch", 1);
+~fpga.sendMsg("/slot/1/pitch", 1.5);      // PV pitch up a fifth at the same speed (max 4, min 1/16)
+// note -> start position (both algorithms). Transients are found when a sample is first loaded
+// and cached in <folder>/.smptr ("list 0 <bank>" in the shell shows the count per sample)
+~fpga.sendMsg("/slot/0/noteMode", 0);     // note 12 + k = k-th 16th of the loop (as SC)
+~fpga.sendMsg("/slot/0/noteMode", 1);     // note 12 + k = k-th transient (slice by hits)
+~fpga.sendMsg("/slot/0/noteMode", 2);     // 16ths, each moved to the nearest transient (groove kept)
+~fpga.sendMsg("/midi/cc", 9, 23, 64);     // CC23: 0-42 grid, 43-85 transients, 86-127 snapped (proposal)
+
+// ---- live algorithm switching on the break-cutter below: grains <-> phase vocoder -------
+(
+~algoSwitch = Routine({ loop { ~fpga.sendMsg("/slot/0/algo", 2.rand); (60 / 172 * 2).wait } }).play;
+)
+~algoSwitch.stop; ~fpga.sendMsg("/slot/0/algo", 0);
 
 // ---- a quick break-cutter: random 16th slices of the drum loop ------------------------
 (
