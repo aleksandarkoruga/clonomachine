@@ -72,6 +72,10 @@ module pv_unit #(
         input [10:0] v;
         par11 = ^v;
     endfunction
+    function [1:0] bsel;                 // FFT memory bank of element v
+        input [10:0] v;
+        bsel = {v[10], ^v};
+    endfunction
     function [10:0] rev11;
         input [10:0] v;
         integer k;
@@ -138,17 +142,26 @@ module pv_unit #(
         wr_d <= win_rom[wr_a];
 
     // ================================================================== memories
-    // FFT data: element i -> bank par11(i), index i[10:1]; {re, im}
-    reg  [53:0] bank0 [0:1023];
-    reg  [53:0] bank1 [0:1023];
-    reg  [9:0]  b0_ra, b1_ra, b0_wa, b1_wa;
-    reg         b0_we, b1_we;
-    reg  [53:0] b0_wd, b1_wd, b0_q, b1_q;
+    // FFT data: element i -> bank {i[10], ^i}, index i[9:1]; {re, im}. The four operands of
+    // butterflies b and b+512 of any radix-2 DIF stage are always in four different banks.
+    reg  [53:0] bank0 [0:511];
+    reg  [53:0] bank1 [0:511];
+    reg  [53:0] bank2 [0:511];
+    reg  [53:0] bank3 [0:511];
+    reg  [8:0]  bk_ra [0:3];
+    reg  [8:0]  bk_wa [0:3];
+    reg         bk_we [0:3];
+    reg  [53:0] bk_wd [0:3];
+    reg  [53:0] bk_q  [0:3];
     always @(posedge clk) begin
-        if (b0_we) bank0[b0_wa] <= b0_wd;
-        b0_q <= bank0[b0_ra];
-        if (b1_we) bank1[b1_wa] <= b1_wd;
-        b1_q <= bank1[b1_ra];
+        if (bk_we[0]) bank0[bk_wa[0]] <= bk_wd[0];
+        bk_q[0] <= bank0[bk_ra[0]];
+        if (bk_we[1]) bank1[bk_wa[1]] <= bk_wd[1];
+        bk_q[1] <= bank1[bk_ra[1]];
+        if (bk_we[2]) bank2[bk_wa[2]] <= bk_wd[2];
+        bk_q[2] <= bank2[bk_ra[2]];
+        if (bk_we[3]) bank3[bk_wa[3]] <= bk_wd[3];
+        bk_q[3] <= bank3[bk_ra[3]];
     end
     // current grain, bins 0..2047 {mag 27, L 16, phase 16, rot 16}; bin 2048 in registers
     reg  [74:0] cur [0:2047];
@@ -312,6 +325,20 @@ module pv_unit #(
     reg  signed [17:0] mu_c, mu_s;
     reg  signed [45:0] mu_rc, mu_rs, mu_ic, mu_is;
     reg  signed [45:0] mu_rc1, mu_rs1, mu_ic1, mu_is1;
+    reg  signed [27:0] mu2_dr, mu2_di;
+    reg  signed [17:0] mu2_c, mu2_s;
+    reg  signed [45:0] mu2_rc, mu2_rs, mu2_ic, mu2_is;
+    reg  signed [45:0] mu2_rc1, mu2_rs1, mu2_ic1, mu2_is1;
+    always @(posedge clk) begin
+        mu2_rc1 <= mu2_dr * mu2_c;
+        mu2_rs1 <= mu2_dr * mu2_s;
+        mu2_ic1 <= mu2_di * mu2_c;
+        mu2_is1 <= mu2_di * mu2_s;
+        mu2_rc <= mu2_rc1;
+        mu2_rs <= mu2_rs1;
+        mu2_ic <= mu2_ic1;
+        mu2_is <= mu2_is1;
+    end
     always @(posedge clk) begin
         mu_rc1 <= mu_dr * mu_c;
         mu_rs1 <= mu_dr * mu_s;
@@ -454,6 +481,11 @@ module pv_unit #(
     reg  signed [27:0] f_sr2, f_si2;
     reg  signed [27:0] f_sr3, f_si3;
     reg  signed [DW-1:0] f_ar, f_ai, f_br, f_bi;
+    reg  signed [DW-1:0] g_ar, g_ai, g_br, g_bi;
+    reg  signed [27:0] g_sr, g_si, g_sr2, g_si2, g_sr3, g_si3;
+    reg  [10:0] f_ib [0:7];
+    reg  [10:0] f_jb [0:7];
+    reg  [7:0]  f_st0;
 
     // ---------------------------------------------------------------- A0 / A1 / B / C state
     reg  [11:0] k, kq;
@@ -566,7 +598,7 @@ module pv_unit #(
     reg  [11:0] mk [0:5];
 
     always @(posedge clk) begin
-        b0_we <= 0; b1_we <= 0; cu_we <= 0; pk_we <= 0; en_we <= 0; dm_we <= 0;
+        bk_we[0] <= 0; bk_we[1] <= 0; bk_we[2] <= 0; bk_we[3] <= 0; cu_we <= 0; pk_we <= 0; en_we <= 0; dm_we <= 0;
         hi_we <= 0; rg_we <= 0; lb_we <= 0; dv_go <= 0; co_in_v <= 0;
         if (rst) begin
             ph <= P_IDLE;
@@ -808,15 +840,9 @@ module pv_unit #(
                     if (!fr_j4[0])
                         fr_even <= fr_xwr[26:0];
                     else begin
-                        if (par11(fr_j4[11:1])) begin
-                            b1_we <= 1;
-                            b1_wa <= fr_j4[11:2];
-                            b1_wd <= {fr_even, fr_xwr[26:0]};
-                        end else begin
-                            b0_we <= 1;
-                            b0_wa <= fr_j4[11:2];
-                            b0_wd <= {fr_even, fr_xwr[26:0]};
-                        end
+                        bk_we[bsel(fr_j4[11:1])] <= 1;
+                        bk_wa[bsel(fr_j4[11:1])] <= fr_j4[10:2];
+                        bk_wd[bsel(fr_j4[11:1])] <= {fr_even, fr_xwr[26:0]};
                     end
                 end
                 if (ct == 13'd4096 && !fr_v1 && !fr_v2 && !fr_v3 && !fr_v4) begin
@@ -829,45 +855,49 @@ module pv_unit #(
                 end
             end
             // ============================================================ FFT / IFFT
+            // two butterflies per cycle: b and b + 512 (elements ia, ja = ia + span,
+            // ib = ia + d, jb = ja + d; d = 512 in stage 0, else 1024)
             P_FFT, P_IFFT: begin
-                // issue
                 fv <= {fv[6:0], 1'b0};
                 if (bf_run) begin : issue
-                    reg [10:0] span, kk, ia, ja;
+                    reg [10:0] span, kk, ia, ja, ib, jb, dl;
                     span = 11'd1024 >> st;
                     kk = bf & (span - 1'b1);
                     ia = ((bf & ~(span - 1'b1)) << 1) | kk;
                     ja = ia | span;
-                    if (par11(ia)) begin
-                        b1_ra <= ia[10:1];
-                        b0_ra <= ja[10:1];
-                    end else begin
-                        b0_ra <= ia[10:1];
-                        b1_ra <= ja[10:1];
-                    end
+                    dl = (st == 0) ? 11'd512 : 11'd1024;
+                    ib = ia + dl;
+                    jb = ja + dl;
+                    bk_ra[bsel(ia)] <= ia[9:1];
+                    bk_ra[bsel(ja)] <= ja[9:1];
+                    bk_ra[bsel(ib)] <= ib[9:1];
+                    bk_ra[bsel(jb)] <= jb[9:1];
                     cs_a <= {kk, 1'b0} << st;
                     f_i[0] <= ia;
                     f_j[0] <= ja;
+                    f_ib[0] <= ib;
+                    f_jb[0] <= jb;
                     fv[0] <= 1;
-                    if (bf == 11'd1023)
+                    if (bf == 11'd511)
                         bf_run <= 0;
                     bf <= bf + 1'b1;
                 end
                 for (ii = 1; ii < 8; ii = ii + 1) begin
                     f_i[ii] <= f_i[ii-1];
                     f_j[ii] <= f_j[ii-1];
+                    f_ib[ii] <= f_ib[ii-1];
+                    f_jb[ii] <= f_jb[ii-1];
                 end
-                // fv[1]: RAM data valid (and cs stage 1)
+                f_st0 <= {f_st0[6:0], st == 0};
+                // fv[1]: RAM data
                 if (fv[1]) begin
-                    if (par11(f_i[1])) begin
-                        f_ar <= b1_q[53:27]; f_ai <= b1_q[26:0];
-                        f_br <= b0_q[53:27]; f_bi <= b0_q[26:0];
-                    end else begin
-                        f_ar <= b0_q[53:27]; f_ai <= b0_q[26:0];
-                        f_br <= b1_q[53:27]; f_bi <= b1_q[26:0];
-                    end
+                    f_ar <= bk_q[bsel(f_i[1])][53:27];  f_ai <= bk_q[bsel(f_i[1])][26:0];
+                    f_br <= bk_q[bsel(f_j[1])][53:27];  f_bi <= bk_q[bsel(f_j[1])][26:0];
+                    g_ar <= bk_q[bsel(f_ib[1])][53:27]; g_ai <= bk_q[bsel(f_ib[1])][26:0];
+                    g_br <= bk_q[bsel(f_jb[1])][53:27]; g_bi <= bk_q[bsel(f_jb[1])][26:0];
                 end
-                // fv[2]: sums, multiplier operands (cs valid now)
+                // fv[2]: sums, multiplier operands (cs valid now). Second butterfly's twiddle:
+                // same in stages >= 1, rotated by -j (index + 1024) in stage 0.
                 if (fv[2]) begin
                     f_sr <= f_ar + f_br;
                     f_si <= f_ai + f_bi;
@@ -875,33 +905,43 @@ module pv_unit #(
                     mu_di <= f_ai - f_bi;
                     mu_c <= cs_c;
                     mu_s <= inv ? -cs_s : cs_s;
+                    g_sr <= g_ar + g_br;
+                    g_si <= g_ai + g_bi;
+                    mu2_dr <= g_ar - g_br;
+                    mu2_di <= g_ai - g_bi;
+                    if (f_st0[1]) begin
+                        mu2_c <= -cs_s;
+                        mu2_s <= inv ? -cs_c : cs_c;
+                    end else begin
+                        mu2_c <= cs_c;
+                        mu2_s <= inv ? -cs_s : cs_s;
+                    end
                 end
                 f_sr2 <= f_sr; f_si2 <= f_si;
                 f_sr3 <= f_sr2; f_si3 <= f_si2;
-                // fv[5]: products ready (mu_* registered twice after fv[3])
+                g_sr2 <= g_sr; g_si2 <= g_si;
+                g_sr3 <= g_sr2; g_si3 <= g_si2;
+                // fv[5]: products ready
                 if (fv[5]) begin : wb
-                    reg signed [47:0] pr, pi;
-                    reg signed [DW-1:0] ar, ai, br, bi;
-                    // W = c - j s (forward) / c + j s (inverse, s negated above)
+                    reg signed [47:0] pr, pi, qr, qim;
                     pr = mu_rc + mu_is;
                     pi = mu_ic - mu_rs;
+                    qr = mu2_rc + mu2_is;
+                    qim = mu2_ic - mu2_rs;
+                    bk_we[bsel(f_i[5])] <= 1;  bk_wa[bsel(f_i[5])] <= f_i[5][9:1];
+                    bk_we[bsel(f_j[5])] <= 1;  bk_wa[bsel(f_j[5])] <= f_j[5][9:1];
+                    bk_we[bsel(f_ib[5])] <= 1; bk_wa[bsel(f_ib[5])] <= f_ib[5][9:1];
+                    bk_we[bsel(f_jb[5])] <= 1; bk_wa[bsel(f_jb[5])] <= f_jb[5][9:1];
                     if (!inv) begin
-                        ar = sat27((f_sr3 + 28'sd1) >>> 1);
-                        ai = sat27((f_si3 + 28'sd1) >>> 1);
-                        br = sat27((pr + 48'sd65536) >>> 17);
-                        bi = sat27((pi + 48'sd65536) >>> 17);
+                        bk_wd[bsel(f_i[5])]  <= {sat27((f_sr3 + 28'sd1) >>> 1), sat27((f_si3 + 28'sd1) >>> 1)};
+                        bk_wd[bsel(f_j[5])]  <= {sat27((pr + 48'sd65536) >>> 17), sat27((pi + 48'sd65536) >>> 17)};
+                        bk_wd[bsel(f_ib[5])] <= {sat27((g_sr3 + 28'sd1) >>> 1), sat27((g_si3 + 28'sd1) >>> 1)};
+                        bk_wd[bsel(f_jb[5])] <= {sat27((qr + 48'sd65536) >>> 17), sat27((qim + 48'sd65536) >>> 17)};
                     end else begin
-                        ar = sat27(f_sr3);
-                        ai = sat27(f_si3);
-                        br = sat27((pr + 48'sd32768) >>> 16);
-                        bi = sat27((pi + 48'sd32768) >>> 16);
-                    end
-                    if (par11(f_i[5])) begin
-                        b1_we <= 1; b1_wa <= f_i[5][10:1]; b1_wd <= {ar, ai};
-                        b0_we <= 1; b0_wa <= f_j[5][10:1]; b0_wd <= {br, bi};
-                    end else begin
-                        b0_we <= 1; b0_wa <= f_i[5][10:1]; b0_wd <= {ar, ai};
-                        b1_we <= 1; b1_wa <= f_j[5][10:1]; b1_wd <= {br, bi};
+                        bk_wd[bsel(f_i[5])]  <= {sat27(f_sr3), sat27(f_si3)};
+                        bk_wd[bsel(f_j[5])]  <= {sat27((pr + 48'sd32768) >>> 16), sat27((pi + 48'sd32768) >>> 16)};
+                        bk_wd[bsel(f_ib[5])] <= {sat27(g_sr3), sat27(g_si3)};
+                        bk_wd[bsel(f_jb[5])] <= {sat27((qr + 48'sd32768) >>> 16), sat27((qim + 48'sd32768) >>> 16)};
                     end
                 end
                 // next stage when drained
@@ -940,8 +980,7 @@ module pv_unit #(
                     reg [10:0] kk, la;
                     kk = q[11:1];
                     la = q[0] ? rev11(11'd0 - kk) : rev11(kk);
-                    b0_ra <= la[10:1];
-                    b1_ra <= la[10:1];
+                    bk_ra[0] <= la[9:1]; bk_ra[1] <= la[9:1]; bk_ra[2] <= la[9:1]; bk_ra[3] <= la[9:1];
                     if (!q[0])
                         cs_a <= {1'b0, kk};
                     a0v[0] <= 1;
@@ -953,8 +992,8 @@ module pv_unit #(
                     reg [10:0] la;
                     reg signed [DW-1:0] zr_, zi_;
                     la = a0b[1] ? rev11(11'd0 - a0k[1][10:0]) : rev11(a0k[1][10:0]);
-                    if (par11(la)) begin zr_ = b1_q[53:27]; zi_ = b1_q[26:0]; end
-                    else           begin zr_ = b0_q[53:27]; zi_ = b0_q[26:0]; end
+                    zr_ = bk_q[bsel(la)][53:27];
+                    zi_ = bk_q[bsel(la)][26:0];
                     if (!a0b[1]) begin
                         a_ar <= zr_;
                         a_ai <= zi_;
@@ -987,8 +1026,9 @@ module pv_unit #(
                     syr = ($signed(a0e_r[2]) <<< 16) - mu_ic + mu_rs;
                     syi = -($signed(a0e_i[2]) <<< 16) - mu_rc - mu_is;
                     la = rev11(kk);
-                    if (par11(la)) begin b1_we <= 1; b1_wa <= la[10:1]; b1_wd <= {sat27((sxr + 48'sd65536) >>> 17), sat27((sxi + 48'sd65536) >>> 17)}; end
-                    else           begin b0_we <= 1; b0_wa <= la[10:1]; b0_wd <= {sat27((sxr + 48'sd65536) >>> 17), sat27((sxi + 48'sd65536) >>> 17)}; end
+                    bk_we[bsel(la)] <= 1;
+                    bk_wa[bsel(la)] <= la[9:1];
+                    bk_wd[bsel(la)] <= {sat27((sxr + 48'sd65536) >>> 17), sat27((sxi + 48'sd65536) >>> 17)};
                     x_ar <= sat27((syr + 48'sd65536) >>> 17);
                     x_ai <= sat27((syi + 48'sd65536) >>> 17);
                     if (a0k[4] == 0) begin
@@ -1000,8 +1040,9 @@ module pv_unit #(
                 if (a0v[5] && a0b[5] && a0k[5] != 0 && a0k[5] != 12'd1024) begin : a0w2
                     reg [10:0] lb;
                     lb = rev11(11'd0 - a0k[5][10:0]);
-                    if (par11(lb)) begin b1_we <= 1; b1_wa <= lb[10:1]; b1_wd <= {x_ar, x_ai}; end
-                    else           begin b0_we <= 1; b0_wa <= lb[10:1]; b0_wd <= {x_ar, x_ai}; end
+                    bk_we[bsel(lb)] <= 1;
+                    bk_wa[bsel(lb)] <= lb[9:1];
+                    bk_wd[bsel(lb)] <= {x_ar, x_ai};
                 end
                 if (q == 12'd2050 && a0v == 0) begin
                     ph <= P_A1;
@@ -1023,8 +1064,7 @@ module pv_unit #(
                     begin : rdX
                         reg [10:0] la;
                         la = rev11(k[10:0]);
-                        b0_ra <= la[10:1];
-                        b1_ra <= la[10:1];
+                        bk_ra[0] <= la[9:1]; bk_ra[1] <= la[9:1]; bk_ra[2] <= la[9:1]; bk_ra[3] <= la[9:1];
                         pp_pk[0] <= k;
                     end
                     pv[0] <= 1;
@@ -1038,10 +1078,9 @@ module pv_unit #(
                     co_in_tag <= pp_pk[1];
                     if (pp_pk[1] == 12'd2048) begin
                         co_in_x <= nyq_r; co_in_y <= nyq_i;
-                    end else if (par11(rev11(pp_pk[1][10:0]))) begin
-                        co_in_x <= b1_q[53:27]; co_in_y <= b1_q[26:0];
                     end else begin
-                        co_in_x <= b0_q[53:27]; co_in_y <= b0_q[26:0];
+                        co_in_x <= bk_q[bsel(rev11(pp_pk[1][10:0]))][53:27];
+                        co_in_y <= bk_q[bsel(rev11(pp_pk[1][10:0]))][26:0];
                     end
                 end
                 // CORDIC output, in bin order
@@ -1355,16 +1394,18 @@ module pv_unit #(
                     wr_ = ($signed(me_r[4]) <<< 16) + (mu_rs + mu_ic);
                     wi_ = -($signed(me_i[4]) <<< 16) + (mu_rc - mu_is);
                     ka = mk[4][10:0];
-                    if (par11(ka)) begin b1_we <= 1; b1_wa <= ka[10:1]; b1_wd <= {sat27((zr_ + 48'sd131072) >>> 18), sat27((zi_ + 48'sd131072) >>> 18)}; end
-                    else           begin b0_we <= 1; b0_wa <= ka[10:1]; b0_wd <= {sat27((zr_ + 48'sd131072) >>> 18), sat27((zi_ + 48'sd131072) >>> 18)}; end
+                    bk_we[bsel(ka)] <= 1;
+                    bk_wa[bsel(ka)] <= ka[9:1];
+                    bk_wd[bsel(ka)] <= {sat27((zr_ + 48'sd131072) >>> 18), sat27((zi_ + 48'sd131072) >>> 18)};
                     x_ar <= sat27((wr_ + 48'sd131072) >>> 18);
                     x_ai <= sat27((wi_ + 48'sd131072) >>> 18);
                 end
                 if (mv[5] && mk[5] != 0 && mk[5] != 12'd1024) begin : c2w2
                     reg [10:0] kb;
                     kb = 11'd0 - mk[5][10:0];
-                    if (par11(kb)) begin b1_we <= 1; b1_wa <= kb[10:1]; b1_wd <= {x_ar, x_ai}; end
-                    else           begin b0_we <= 1; b0_wa <= kb[10:1]; b0_wd <= {x_ar, x_ai}; end
+                    bk_we[bsel(kb)] <= 1;
+                    bk_wa[bsel(kb)] <= kb[9:1];
+                    bk_wd[bsel(kb)] <= {x_ar, x_ai};
                 end
                 if (mv[5] && mk[5] == 12'd1024) begin
                     // last pair written: keep the slot history scalars, inverse transform
@@ -1445,8 +1486,7 @@ module pv_unit #(
                         j = t[11:0];
                         la = rev11(j[11:1]);
                         if (!t13[0]) begin
-                            b0_ra <= la[10:1];
-                            b1_ra <= la[10:1];
+                            bk_ra[0] <= la[9:1]; bk_ra[1] <= la[9:1]; bk_ra[2] <= la[9:1]; bk_ra[3] <= la[9:1];
                         end
                         ov[0] <= 1;
                         o_addr[0] <= jc[11:0] + t[11:0];
@@ -1460,8 +1500,8 @@ module pv_unit #(
                     if (ov[1]) begin : ocap
                         reg signed [26:0] y;
                         if (!o_odd[1]) begin
-                            if (par11(o_la)) begin y = b1_q[53:27]; o_yi <= b1_q[26:0]; end
-                            else              begin y = b0_q[53:27]; o_yi <= b0_q[26:0]; end
+                            y = bk_q[bsel(o_la)][53:27];
+                            o_yi <= bk_q[bsel(o_la)][26:0];
                         end else
                             y = o_yi;
                         o_prod <= y * $signed({1'b0, wr_d});

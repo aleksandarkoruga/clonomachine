@@ -65,8 +65,9 @@ static int64_t sx(uint64_t v, int bits) { return int64_t(v << (64 - bits)) >> (6
 static uint32_t rev11(uint32_t v) { uint32_t r = 0; for (int i = 0; i < 11; ++i) r |= ((v >> i) & 1) << (10 - i); return r; }
 static void elem(uint32_t i, int64_t& re, int64_t& im) {
     auto* r = top->rootp;
-    const uint32_t p = __builtin_parity(i);
-    const uint64_t w = p ? r->pv_unit__DOT__bank1[i >> 1] : r->pv_unit__DOT__bank0[i >> 1];
+    const uint32_t b = ((i >> 10) & 1) << 1 | __builtin_parity(i), a = (i >> 1) & 511;
+    const uint64_t w = b == 0 ? r->pv_unit__DOT__bank0[a] : b == 1 ? r->pv_unit__DOT__bank1[a]
+                     : b == 2 ? r->pv_unit__DOT__bank2[a] : r->pv_unit__DOT__bank3[a];
     re = sx(w >> 27, 27);
     im = sx(w & ((1ull << 27) - 1), 27);
 }
