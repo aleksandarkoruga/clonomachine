@@ -61,6 +61,9 @@ struct __attribute__((packed)) smp_event {
     X(INTERVAL,    interval,    16) /* stutter period, seconds, <= 0.25                   */ \
     X(AMP,         amp,         16) /* 0..16                                              */ \
     X(ALGOAMP,     algoAmp,     16) /* 0..1                                               */ \
+    X(ALGO,        algo,        0)  /* 0 grains (BufGrainPlay), 1 phase vocoder (Bungee)  */ \
+    X(PVTRANSIENT, pvTransient, 0)  /* 0/1: phase vocoder transient handling (default 1)  */ \
+    X(NOTEMODE,    noteMode,    0)  /* note -> pos: 0 equal 16ths, 1 transients, 2 snapped */ \
     X(KILL,        kill,        0)  /* strobe: silence all grains                         */ \
     X(ENABLE,      enable,      0)  /* 0/1                                                */
 

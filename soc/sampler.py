@@ -2,7 +2,7 @@
 # LiteX wrapper for rtl/sampler_engine.v + rtl/dsm_dac.v.
 #
 # sys domain  : CSRs, SDRAM line fetcher (LiteDRAM native read port)
-# audio domain: engine + delta-sigma DAC (1024 cycles per output sample)
+# audio domain: engine (+ phase-vocoder unit) + delta-sigma DAC (1024 cycles per output sample)
 #
 # Clock-domain crossings: command FIFO (sys->audio), line-request FIFO (audio->sys),
 # line-data FIFO (sys->audio), dual-clock status RAM (audio->sys), MultiReg for ctrl.
@@ -123,6 +123,9 @@ class Sampler(LiteXModule):
             p_SLOT_BITS = slot_bits,
             p_HANN_HEX  = os.path.join(RTL_DIR, "hann.hex"),
             p_EXP2_HEX  = os.path.join(RTL_DIR, "exp2.hex"),
+            p_PV_SIN_HEX  = os.path.join(RTL_DIR, "pv_sin.hex"),
+            p_PV_ATAN_HEX = os.path.join(RTL_DIR, "pv_atan.hex"),
+            p_PV_WIN_HEX  = os.path.join(RTL_DIR, "pv_win.hex"),
             i_clk        = ClockSignal(cd_audio),
             i_rst        = rst,
             i_cmd_valid  = cmd_fifo.source.valid,
@@ -155,4 +158,5 @@ class Sampler(LiteXModule):
             audio_pads.r.eq(code),
         ]
         platform.add_source(os.path.join(RTL_DIR, "sampler_engine.v"))
+        platform.add_source(os.path.join(RTL_DIR, "pv_unit.v"))
         platform.add_source(os.path.join(RTL_DIR, "dsm_dac.v"))

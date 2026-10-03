@@ -37,12 +37,12 @@ static void print_q16(int32_t v) {
 }
 
 static void cmd_status(void) {
-    printf("magic %08lx  fs %lu Hz  bpm %lu.%03lu  cycles %lu (max %lu / %d)  samples %lu  req drops %lu\n",
+    printf("magic %08lx  fs %lu Hz  bpm %lu.%03lu  cycles %lu (max %lu / %d)  samples %lu  req drops %lu  pv misses %lu\n",
            (unsigned long)eng_status(SMP_SG_MAGIC), (unsigned long)(eng_fs_q16() >> 16),
            (unsigned long)(g_bpm_milli / 1000), (unsigned long)(g_bpm_milli % 1000),
            (unsigned long)eng_status(SMP_SG_CYCLES), (unsigned long)eng_status(SMP_SG_CYCLES_MAX),
            ENGINE_CYCLES_PER_SAMPLE, (unsigned long)eng_status(SMP_SG_SAMPLES),
-           (unsigned long)eng_status(SMP_SG_REQ_DROPS));
+           (unsigned long)eng_status(SMP_SG_REQ_DROPS), (unsigned long)eng_status(SMP_SG_PV_MISSES));
     printf("beat %lu  links: console %lu frames / %lu bad / %lu rx overflows, esp %lu frames / %lu bad\n",
            (unsigned long)eng_status(SMP_SG_BEAT_HI), (unsigned long)g_slip_console.frames,
            (unsigned long)g_slip_console.crc_errors, (unsigned long)(uart_rx_overflows + g_cin_drops),
@@ -58,8 +58,12 @@ static void cmd_status(void) {
         print_q16(sl->rate_q16);
         printf("  pitch ");
         print_q16(sl->pitch_q16);
-        printf("  16ths %lu  tempoLock %d  bgAdvance %d\n", (unsigned long)slot_sixteenths(s), sl->tempo_lock,
-               sl->bg_advance);
+        printf("  16ths %lu  tempoLock %d  bgAdvance %d  algo %s", (unsigned long)slot_sixteenths(s), sl->tempo_lock,
+               sl->bg_advance, sl->algo ? "pv" : "grain");
+        {
+            const uint32_t pv = eng_status(s * 8 + SMP_S_PV);
+            printf(" (pv %s, xfade %lu%%)\n", (pv & 1) ? "on" : "off", (unsigned long)(((pv >> 16) * 100 + 32768) >> 16));
+        }
     }
 }
 

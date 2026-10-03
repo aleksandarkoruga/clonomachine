@@ -6,6 +6,7 @@
  * (compensated in PHASOR_INC/PITCH; 48 kHz mono 16-bit is the native format).
  */
 #include "samples.h"
+#include "transients.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -460,6 +461,7 @@ static void add_dir_wavs(struct lib* L, const char* dir, const char* prefix) {
         }
         struct sample* s = &L->s[L->count++];
         memset(s, 0, sizeof(*s));
+        s->ntr = TR_NONE;
         snprintf(s->name, sizeof(s->name), "%s%s", prefix, fi.fname);
         s->fsize = (uint32_t)fi.fsize;
         s->fdate = fi.fdate;
@@ -467,6 +469,116 @@ static void add_dir_wavs(struct lib* L, const char* dir, const char* prefix) {
     }
     f_closedir(&dj);
 }
+
+/* ---- transients: pool + per-folder cache file ------------------------------------- */
+#define TR_POOL (MAX_LIBS * MAX_PER_LIB * TR_MAX)
+static uint32_t g_tr_pool[TR_POOL];
+static uint32_t g_tr_used;
+static int g_tr_dirty[MAX_LIBS];
+#define TRF_MAGIC 0x4E525453u /* 'STRN' */
+#define TRF_VERSION 1
+struct trf_hdr { uint32_t magic, version, count, rec_size; };
+struct trf_rec { uint32_t fsize; uint16_t fdate, ftime; uint32_t hash; uint8_t n, pad[3]; };
+
+static uint32_t name_hash(const char* p) {
+    uint32_t h = 2166136261u;
+    while (*p)
+        h = (h ^ (uint8_t)*p++) * 16777619u;
+    return h;
+}
+
+int samples_transients(const struct sample* s, const uint32_t** pos) {
+    if (!s || s->ntr == TR_NONE)
+        return -1;
+    *pos = &g_tr_pool[s->tr];
+    return s->ntr;
+}
+
+static void tr_store(struct sample* s, const uint32_t* p, int n) {
+    if (n < 0)
+        n = 0;
+    if (n > TR_MAX)
+        n = TR_MAX;
+    if (g_tr_used + (uint32_t)n > TR_POOL)
+        return;
+    for (int k = 0; k < n; ++k)
+        g_tr_pool[g_tr_used + (uint32_t)k] = p[k];
+    s->tr = g_tr_used;
+    s->ntr = (uint8_t)n;
+    g_tr_used += (uint32_t)n;
+}
+
+static int trf_match(const struct sample* s, const struct trf_rec* r) {
+    return s->fsize == r->fsize && s->fdate == r->fdate && s->ftime == r->ftime && name_hash(s->name) == r->hash;
+}
+
+static int trf_load(int lib) {
+    char p[32];
+    FIL f;
+    UINT n;
+    struct trf_hdr h;
+    struct lib* L = &g_libs[lib];
+    snprintf(p, sizeof(p), "%s/.smptr", g_dirs[lib]);
+    if (f_open(&f, p, FA_READ) != FR_OK)
+        return 0;
+    int got = 0;
+    if (f_read(&f, &h, sizeof(h), &n) == FR_OK && n == sizeof(h) && h.magic == TRF_MAGIC && h.version == TRF_VERSION
+        && h.rec_size == sizeof(struct trf_rec)) {
+        for (uint32_t i = 0; i < h.count; ++i) {
+            struct trf_rec r;
+            uint32_t pos[TR_MAX];
+            if (f_read(&f, &r, sizeof(r), &n) != FR_OK || n != sizeof(r) || r.n > TR_MAX)
+                break;
+            if (r.n && (f_read(&f, pos, r.n * 4u, &n) != FR_OK || n != r.n * 4u))
+                break;
+            /* records are written in library order: try the same index first */
+            struct sample* s = (i < (uint32_t)L->count && trf_match(&L->s[i], &r)) ? &L->s[i] : 0;
+            for (int k = 0; !s && k < L->count; ++k)
+                if (trf_match(&L->s[k], &r))
+                    s = &L->s[k];
+            if (s && s->ntr == TR_NONE) {
+                tr_store(s, pos, r.n);
+                ++got;
+            }
+        }
+    }
+    f_close(&f);
+    return got;
+}
+
+static void trf_save(int lib) {
+    char p[32];
+    FIL f;
+    UINT n;
+    const struct lib* L = &g_libs[lib];
+    snprintf(p, sizeof(p), "%s/.smptr", g_dirs[lib]);
+    if (f_open(&f, p, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK)
+        return;
+    uint32_t cnt = 0;
+    for (int i = 0; i < L->count; ++i)
+        cnt += L->s[i].ntr != TR_NONE;
+    const struct trf_hdr h = {TRF_MAGIC, TRF_VERSION, cnt, sizeof(struct trf_rec)};
+    f_write(&f, &h, sizeof(h), &n);
+    for (int i = 0; i < L->count; ++i) {
+        const struct sample* s = &L->s[i];
+        if (s->ntr == TR_NONE)
+            continue;
+        struct trf_rec r;
+        memset(&r, 0, sizeof(r));
+        r.fsize = s->fsize;
+        r.fdate = s->fdate;
+        r.ftime = s->ftime;
+        r.hash = name_hash(s->name);
+        r.n = s->ntr;
+        f_write(&f, &r, sizeof(r), &n);
+        if (s->ntr)
+            f_write(&f, &g_tr_pool[s->tr], s->ntr * 4u, &n);
+    }
+    f_close(&f);
+    g_tr_dirty[lib] = 0;
+}
+
+static int16_t tr_get(void* ctx, uint32_t i) { return ((volatile int16_t*)ctx)[i]; }
 
 static int index_lib(int l) {
     struct lib* L = &g_libs[l];
@@ -524,8 +636,9 @@ static int index_lib(int l) {
     if (g_idx_dirty[l])
         idx_save(l);
     build_banks(L);
-    printf("SD: %-8s %4d WAVs in %3d banks (%d from index, %d parsed)\n", g_dirs[l], L->count, L->nbanks, cached,
-           parsed);
+    const int ntr = trf_load(l);
+    printf("SD: %-8s %4d WAVs in %3d banks (%d from index, %d parsed, %d with transients)\n", g_dirs[l], L->count,
+           L->nbanks, cached, parsed, ntr);
     return L->count;
 }
 
@@ -751,6 +864,12 @@ static void job_finish(void) {
     s->ready = 1;
     if (bank_complete(g_job.lib, b))
         b->state = BANK_RESIDENT;
+    if (s->ntr == TR_NONE) { /* first load: find the transients (cached in .smptr) */
+        uint32_t pos[TR_MAX];
+        const int n = tr_analyse(tr_get, (void*)(g_mem + b->base + s->offset + SMP_PREPAD), s->frames, pos, idle_hook);
+        tr_store(s, pos, n);
+        g_tr_dirty[g_job.lib] = 1;
+    }
     const uint32_t ms = (now_samples() - g_job.t0) / 48;
     g_load_ms += ms;
     ++g_load_count;
@@ -781,9 +900,12 @@ int samples_poll(void) {
         if (!job_start()) {
             /* idle: persist newly measured peaks after 2 s without loads */
             if (now_samples() - g_idle_since > 96000)
-                for (int l = 0; l < MAX_LIBS; ++l)
+                for (int l = 0; l < MAX_LIBS; ++l) {
                     if (g_idx_dirty[l])
                         idx_save(l);
+                    if (g_tr_dirty[l])
+                        trf_save(l);
+                }
             return 0;
         }
     }
@@ -947,10 +1069,14 @@ void samples_list(int lib, int bank) {
         for (int i = 0; i < b->count; ++i) {
             const struct sample* s = &L->s[b->first + i];
             const uint32_t ms = (uint32_t)((uint64_t)s->frames * 1000 / s->sr);
-            printf("  %3d %c %-40s %6lu ms %5lu Hz %uch %2ub  %3lu.%02lu bpm  2^%ld beats\n", i, s->ready ? '*' : ' ',
+            printf("  %3d %c %-40s %6lu ms %5lu Hz %uch %2ub  %3lu.%02lu bpm  2^%ld beats", i, s->ready ? '*' : ' ',
                    s->name, (unsigned long)ms, (unsigned long)s->sr, s->ch, s->bits,
                    (unsigned long)(s->bpm_q16 >> 16), (unsigned long)(((s->bpm_q16 & 0xFFFF) * 100) >> 16),
                    (long)s->beats_log2);
+            if (s->ntr == TR_NONE)
+                printf("  transients ?\n");
+            else
+                printf("  %u transients\n", s->ntr);
         }
     }
 }

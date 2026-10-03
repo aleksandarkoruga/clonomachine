@@ -8,6 +8,8 @@
  *
  * Boot only indexes: "<dir>/.smpidx" caches format, length, BPM and peak per WAV,
  * keyed on name + size + timestamp, so only new or changed files are parsed.
+ * Transients (fw/transients.c) are found when a sample is first loaded and cached in
+ * "<dir>/.smptr" (same keys), for the transient note -> position mode.
  */
 #ifndef SAMPLES_H
 #define SAMPLES_H
@@ -32,8 +34,11 @@ struct sample {
     int32_t  beats_log2;               /* the loop is 2^beats_log2 beats long         */
     uint32_t bpm_q16;
     int16_t  peak;                     /* 0 = not measured yet                            */
+    uint8_t  ntr;                      /* transients (TR_NONE: not analysed yet)          */
+    uint32_t tr;                       /* first transient in the pool                     */
     uint32_t offset;                   /* words from the bank base                        */
 };
+#define TR_NONE 0xFF
 
 enum { BANK_NONE = 0, BANK_LOADING, BANK_RESIDENT };
 
@@ -75,6 +80,9 @@ static inline struct sample* samples_get(int lib, int bank, int idx) {
         return 0;
     return &g_libs[lib].s[b->first + idx];
 }
+/* Transient positions (samples, ascending) of an analysed sample; -1 if not analysed. */
+int samples_transients(const struct sample* s, const uint32_t** pos);
+
 /* Engine word address of a ready sample, NOT_RESIDENT otherwise. */
 uint32_t samples_base(int lib, int bank, int idx);
 

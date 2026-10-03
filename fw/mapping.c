@@ -86,6 +86,8 @@ static void cc(int s, int c, int v) {
     case 18: sl->amp_q16 = (v * 65536) / 127; slot_apply_output(s); break;
     case 20: sl->tempo_lock = v >= 64; slot_apply_tempo(s); break;             /* proposal */
     case 21: sl->bg_advance = v >= 64; slot_apply_flags(s); break;             /* proposal */
+    case 22: sl->algo = v >= 64 ? 1 : 0; slot_apply_algo(s); break;            /* proposal */
+    case 23: sl->note_mode = v / 43; break;                                     /* proposal: 0/1/2 */
     default: break;
     }
 }
@@ -134,6 +136,9 @@ static void raw_param(int s, int p, int32_t v) {
     case P_INTERVAL: set_interval(s, v); break;
     case P_AMP: sl->amp_q16 = v; slot_apply_output(s); break;
     case P_ALGOAMP: sl->algo_q16 = v; slot_apply_output(s); break;
+    case P_ALGO: sl->algo = v < 0 ? 0 : v > 1 ? 1 : v; slot_apply_algo(s); break;
+    case P_PVTRANSIENT: sl->pv_transient = !!v; slot_apply_algo(s); break;
+    case P_NOTEMODE: sl->note_mode = v < 0 ? 0 : v > 2 ? 2 : v; break;
     case P_KILL: eng_slot_write(s, SMP_R_STROBE, SMP_STROBE_KILL); break;
     case P_ENABLE: sl->enabled = !!v; slot_apply_flags(s); break;
     default: break;

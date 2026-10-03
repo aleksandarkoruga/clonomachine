@@ -112,6 +112,8 @@ void slots_init(void) {
         sl->buf = -1;
         sl->enabled = 1;
         sl->tempo_lock = 1;
+        sl->algo = 0;
+        sl->pv_transient = 1;
         sl->max_grains = 32;
         /* initial BufGrainPlay values: a smooth time-stretch; any other texture is just
            other values of the same parameters */
@@ -229,9 +231,15 @@ static void apply_buffer(int s, const struct sample* old) {
     slot_apply_grain(s);
 }
 
+void slot_apply_algo(int s) {
+    const struct slot* sl = &g_slots[s];
+    eng_slot_write(s, SMP_R_ALGO, (uint32_t)(sl->algo & SMP_ALGO_MASK) | (sl->pv_transient ? 0 : SMP_ALGO_NO_TRANSIENT));
+}
+
 void slot_apply(int s) {
     apply_buffer(s, 0);
     slot_apply_output(s);
+    slot_apply_algo(s);
 }
 
 /* Switches to the wanted buffer if it is in SDRAM. Returns 1 when playing it. */
@@ -320,13 +328,39 @@ void slot_trig(int s) {
     eng_slot_write(s, SMP_R_STROBE, SMP_STROBE_TRIG); /* strobe last: params land first */
 }
 
+static int32_t fmod_i(int32_t a, int32_t n) {
+    const int32_t m = a % n;
+    return m < 0 ? m + n : m; /* SC % is a floored modulo */
+}
+
 void slot_note_on(int s, int note, int vel) {
     struct slot* sl = &g_slots[s];
     const int32_t n16 = (int32_t)slot_sixteenths(s);
-    int32_t m = (note - 12) % n16;
-    if (m < 0)
-        m += n16; /* SC % is a floored modulo */
+    const int32_t m = fmod_i(note - 12, n16);
     sl->pos_q30 = (uint32_t)(((uint64_t)m << 30) / (uint32_t)n16);
+    const struct sample* smp = cur_sample(s);
+    const uint32_t* tp;
+    const int nt = (sl->note_mode && smp) ? samples_transients(smp, &tp) : -1;
+    if (nt > 0 && smp->frames) {
+        uint32_t p = 0;
+        if (sl->note_mode == 1) {
+            p = tp[fmod_i(note - 12, nt)];                     /* k-th transient */
+        } else {
+            /* the 16th, moved to the nearest transient within half a 16th */
+            const uint32_t g = (uint32_t)(((uint64_t)m * smp->frames) / (uint32_t)n16);
+            const uint32_t half = smp->frames / (uint32_t)(2 * n16);
+            uint32_t best = half + 1;
+            p = g;
+            for (int k = 0; k < nt; ++k) {
+                const uint32_t d = tp[k] > g ? tp[k] - g : g - tp[k];
+                if (d < best) {
+                    best = d;
+                    p = tp[k];
+                }
+            }
+        }
+        sl->pos_q30 = (uint32_t)(((uint64_t)p << 30) / smp->frames);
+    }
     sl->repeats = vel - 1;
     if (sl->pos_pin) { /* as in SC: Latch(pos, trig), the playhead runs from there */
         sl->pos_pin = 0;

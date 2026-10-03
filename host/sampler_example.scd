@@ -70,6 +70,13 @@
 ~fpga.sendMsg("/slot/1/bgAdvance", 1);    // notes enter a sample that kept running in the background
 ~fpga.sendMsg("/transport/start");        // restart background playheads + beat counter together
 
+// ---- algorithm per slot, switchable live (5 ms crossfade, both stay BPM locked) -------
+~fpga.sendMsg("/slot/1/algo", 1);         // phase vocoder (Bungee): smooth stretch, rate/pitch as above
+~fpga.sendMsg("/slot/1/algo", 0);         // back to the BufGrainPlay grains
+~fpga.sendMsg("/slot/1/pvTransient", 0);  // phase vocoder without Bungee's transient handling
+~fpga.sendMsg("/midi/cc", 10, 22, 127);   // CC22 >= 64: phase vocoder, < 64: grains (proposal)
+~fpga.sendMsg("/slot/1/pos", 0.4); ~fpga.sendMsg("/slot/1/algo", 1); // pinned pos + PV = spectral freeze
+
 // ---- a quick break-cutter: random 16th slices of the drum loop ------------------------
 (
 ~rand=0.1;

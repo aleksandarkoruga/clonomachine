@@ -26,6 +26,9 @@ struct slot {
     /* engine extras */
     int tempo_lock, max_grains, enabled;
     int bg_advance;          /* trig/pin position = pos + background phasor (keeps playing) */
+    int algo;                /* 0 grains, 1 phase vocoder (switches live, crossfaded)    */
+    int pv_transient;        /* phase vocoder transient handling on                     */
+    int note_mode;           /* note -> pos: 0 equal 16ths, 1 k-th transient, 2 16ths snapped to transients */
     uint32_t seed;
     /* drum voice gate / stutter / output */
     int env_abs;             /* 0: env_bars at the global tempo, 1: env_sec             */
@@ -49,6 +52,7 @@ void slot_apply_tempo(int s);          /* bpm, tempo lock, rate, pitch, gate len
 void slot_apply_grain(int s);
 void slot_apply_output(int s);
 void slot_apply_flags(int s);
+void slot_apply_algo(int s);
 
 void slot_set_pos(int s, int32_t pos_q30); /* UGen pos: >= 0 pins, < 0 runs free */
 void slot_trig(int s);                 /* POS + stutter params + TRIG strobe */
