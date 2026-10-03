@@ -306,7 +306,8 @@ int main(int argc, char** argv) {
         tick();
         top->job_valid = 0;
         const uint64_t t0 = cycles;
-        tick();
+        for (int i = 0; i < 4; ++i)   // the unit picks a queued job within a few cycles
+            tick();
         int lastPh = top->rootp->pv_unit__DOT__ph;
         while (top->busy && cycles - t0 < 2000000) {
             tick();

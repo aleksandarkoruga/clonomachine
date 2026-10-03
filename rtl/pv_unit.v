@@ -246,9 +246,14 @@ module pv_unit #(
     wire [JW-1:0] job_word = {job_clear, job_win, job_reset, job_notr, job_c, job_dl, job_ph,
                               job_ahead, job_inc, job_rate, job_base, job_frames};
 
-    // earliest-deadline head
-    reg  [SB-1:0] pick;
-    reg         pick_ok;
+    // earliest-deadline head (registered: a pick is at most one cycle old, and only P_IDLE
+    // pops, so a registered pick is always still valid)
+    reg  [SB-1:0] pick, pick_r;
+    reg         pick_ok, pick_ok_r;
+    always @(posedge clk) begin
+        pick_r    <= pick;
+        pick_ok_r <= pick_ok && !rst;
+    end
     integer qi;
     always @* begin
         pick = 0;
@@ -596,16 +601,17 @@ module pv_unit #(
     wire [27:0] ahop = ahop_s;
 
     // B2 / C2 pipelines
-    reg  [6:0]  pv;                      // generic valid pipeline
-    reg  [11:0] pp_pk [0:6];
-    reg  [10:0] pp_i [0:6];
+    reg  [7:0]  pv;                      // generic valid pipeline
+    reg  [11:0] pp_pk [0:7];
+    reg  [10:0] pp_i [0:7];
+    reg  [15:0] b2_phc, b2_rfc, b2_pph, b2_prt;
     reg  signed [15:0] b2_off, b2_rotF, b2_prot;
     reg  signed [15:0] b2_off2, b2_rotF2, b2_prot2, b2_off3, b2_rotF3, b2_prot3;
     wire signed [16:0] b2_dsh  = $signed(b2_da) >>> 15;
     reg  signed [42:0] b2_prodr;
     reg  [23:0] b2_pkh;
     always @(posedge clk) begin
-        b2_pkh   <= pp_pk[2] * hop[11:0];   // only the low 12 bits matter (a = hop << 20)
+        b2_pkh   <= pp_pk[3] * hop[11:0];   // only the low 12 bits matter (a = hop << 20)
         b2_prodr <= b2_dsh * tmul;
     end
     reg  [31:0] b2_da;
@@ -643,10 +649,11 @@ module pv_unit #(
     reg  signed [27:0] a0e_i [0:2];
     reg  signed [27:0] a0d_r [0:2];
     reg  signed [27:0] a0d_i [0:2];
-    reg  [4:0]  b1v;
-    reg  [10:0] b1i [0:4];
-    reg  [11:0] b1pk [0:4];
-    reg  [11:0] b1en [0:4];
+    reg  [5:0]  b1v;
+    reg  [10:0] b1i [0:5];
+    reg  [11:0] b1pk [0:5];
+    reg  [11:0] b1en [0:5];
+    reg  [15:0] b1_Lpk, b1_pLpk, b1_Len;
     reg  [1:0]  c_ld;
     reg  [11:0] c1n [0:2];
     reg  [15:0] c1d [0:2];
@@ -696,7 +703,7 @@ module pv_unit #(
             // queue counts (push and pop may coincide)
             for (ii = 0; ii < NS; ii = ii + 1)
                 jq_n[ii] <= jq_n[ii] + ((job_valid && job_ready && job_slot == ii) ? 4'd1 : 4'd0)
-                                     - ((ph == P_IDLE && pick_ok && pick == ii) ? 4'd1 : 4'd0);
+                                     - ((ph == P_IDLE && pick_ok_r && pick_r == ii) ? 4'd1 : 4'd0);
 
             // ---- fills (PV lines)
             if (fill_valid) begin
@@ -710,11 +717,11 @@ module pv_unit #(
 
             case (ph)
             // ============================================================ idle / take
-            P_IDLE: if (pick_ok) begin
+            P_IDLE: if (pick_ok_r) begin
                 {jclear, jwin, jreset, jnotr, jc, jdl, jph, jahead, jinc, jrate, jbase, jframes}
-                    <= jq[pick*QD + jq_rp[pick]];
-                js <= pick;
-                jq_rp[pick] <= jq_rp[pick] + 1'b1;
+                    <= jq[pick_r*QD + jq_rp[pick_r]];
+                js <= pick_r;
+                jq_rp[pick_r] <= jq_rp[pick_r] + 1'b1;
                 ph <= P_CATCH;
                 t13 <= 0;
             end else begin
@@ -1196,7 +1203,7 @@ module pv_unit #(
             // ============================================================ A1
             P_A1: begin
                 // issue: read X[k] (Nyquist from register) into the CORDIC
-                pv <= {pv[5:0], 1'b0};
+                pv <= {pv[6:0], 1'b0};
                 if (k <= 12'd2048 && pc == 0) begin
                     begin : rdX
                         reg [10:0] la;
@@ -1207,7 +1214,7 @@ module pv_unit #(
                     pv[0] <= 1;
                     k <= k + 1'b1;
                 end
-                for (ii = 1; ii < 7; ii = ii + 1)
+                for (ii = 1; ii < 8; ii = ii + 1)
                     pp_pk[ii] <= pp_pk[ii-1];
                 if (pv[1]) begin
                     co_in_v <= 1;
@@ -1312,8 +1319,8 @@ module pv_unit #(
             // ============================================================ B1: transient suppression
             // one partial per cycle: peak/end -> L[peak], pL[peak], L[end] -> decision
             P_B1: begin
-                b1v <= {b1v[3:0], 1'b0};
-                for (ii = 1; ii < 5; ii = ii + 1) begin
+                b1v <= {b1v[4:0], 1'b0};
+                for (ii = 1; ii < 6; ii = ii + 1) begin
                     b1i[ii] <= b1i[ii-1];
                     b1pk[ii] <= b1pk[ii-1];
                     b1en[ii] <= b1en[ii-1];
@@ -1332,28 +1339,29 @@ module pv_unit #(
                     b1pk[2] <= pk_q;
                     b1en[2] <= en_q;
                 end
-                if (b1v[3]) begin : b1dec
-                    reg [15:0] Lpk, pLpk, Len;
+                if (b1v[3]) begin
+                    b1_Lpk  <= b1pk[3] == 12'd2048 ? n_L : cu_q[47:32];
+                    b1_pLpk <= b1pk[3] == 12'd2048 ? h_nL[js] : hi_q[47:32];
+                    b1_Len  <= b1en[3] == 12'd2048 ? n_L : (b1en[3] == 12'd2049 ? 16'd0 : lc_q);
+                end
+                if (b1v[4]) begin : b1dec
                     reg [10:0] i;
                     reg trans;
-                    i = b1i[3];
-                    Lpk  = b1pk[3] == 12'd2048 ? n_L : cu_q[47:32];
-                    pLpk = b1pk[3] == 12'd2048 ? h_nL[js] : hi_q[47:32];
-                    Len  = b1en[3] == 12'd2048 ? n_L : (b1en[3] == 12'd2049 ? 16'd0 : lc_q);
+                    i = b1i[4];
                     trans = cont && !jnotr && i != 0 && i != P - 1'b1 && i != strongest
-                         && $signed({1'b0, Lpk}) > $signed({1'b0, pLpk}) + 18'sd599;
+                         && $signed({1'b0, b1_Lpk}) > $signed({1'b0, b1_pLpk}) + 18'sd599;
                     if (i == 0) begin
-                        b_endp <= b1en[3];
-                        b_lendp <= Len;
-                    end else if (trans && b_lendp > Len) begin
-                        en_we <= 1; en_wa <= i[9:0] - 1'b1; en_wd <= b1en[3];   // end[i-1] = end[i]
-                        b_endp <= b1en[3];
-                        b_lendp <= Len;
+                        b_endp <= b1en[4];
+                        b_lendp <= b1_Len;
+                    end else if (trans && b_lendp > b1_Len) begin
+                        en_we <= 1; en_wa <= i[9:0] - 1'b1; en_wd <= b1en[4];   // end[i-1] = end[i]
+                        b_endp <= b1en[4];
+                        b_lendp <= b1_Len;
                     end else if (trans) begin
                         en_we <= 1; en_wa <= i[9:0]; en_wd <= b_endp;            // end[i] = end[i-1]
                     end else begin
-                        b_endp <= b1en[3];
-                        b_lendp <= Len;
+                        b_endp <= b1en[4];
+                        b_lendp <= b1_Len;
                     end
                 end
                 if (q == {1'b0, P} && b1v == 0) begin
@@ -1365,14 +1373,14 @@ module pv_unit #(
             end
             // ============================================================ B2: phase advance per partial
             P_B2: begin
-                pv <= {pv[5:0], 1'b0};
+                pv <= {pv[6:0], 1'b0};
                 if (k < {1'b0, P} && pc == 0) begin
                     pk_ra <= k[9:0];
                     pp_i[0] <= k[10:0];
                     pv[0] <= 1;
                     k <= k + 1'b1;
                 end
-                for (ii = 1; ii < 7; ii = ii + 1) begin
+                for (ii = 1; ii < 8; ii = ii + 1) begin
                     pp_pk[ii] <= pp_pk[ii-1];
                     pp_i[ii] <= pp_i[ii-1];
                 end
@@ -1382,28 +1390,30 @@ module pv_unit #(
                     hi_ra <= {js, pk_q[10:0]};
                     pp_pk[2] <= pk_q;
                 end
-                // pv[3]: data (b2_pkh = peak * hop[11:0] registered meanwhile)
-                if (pv[3]) begin : b2a
-                    reg [15:0] phc, rfc, pph, prt;
-                    phc = pp_pk[3] == 12'd2048 ? n_ph   : cu_q[31:16];
-                    rfc = pp_pk[3] == 12'd2048 ? n_rotF : cu_q[15:0];
-                    pph = pp_pk[3] == 12'd2048 ? h_nph[js]  : hi_q[31:16];
-                    prt = pp_pk[3] == 12'd2048 ? h_nrot[js] : hi_q[15:0];
-                    b2_off <= (rev ? -phc : phc) - (prev_rev ? -pph : pph);
-                    b2_rotF <= rfc;
-                    b2_prot <= prt;
-                    b2_da <= ({phc, 16'd0} - {pph, 16'd0}) - {b2_pkh[11:0], 20'd0};
+                // pv[3]: RAM data registered
+                if (pv[3]) begin
+                    b2_phc <= pp_pk[3] == 12'd2048 ? n_ph   : cu_q[31:16];
+                    b2_rfc <= pp_pk[3] == 12'd2048 ? n_rotF : cu_q[15:0];
+                    b2_pph <= pp_pk[3] == 12'd2048 ? h_nph[js]  : hi_q[31:16];
+                    b2_prt <= pp_pk[3] == 12'd2048 ? h_nrot[js] : hi_q[15:0];
+                end
+                // pv[4]: phase terms (b2_pkh = peak * hop[11:0] registered meanwhile)
+                if (pv[4]) begin
+                    b2_off <= (rev ? -b2_phc : b2_phc) - (prev_rev ? -b2_pph : b2_pph);
+                    b2_rotF <= b2_rfc;
+                    b2_prot <= b2_prt;
+                    b2_da <= ({b2_phc, 16'd0} - {b2_pph, 16'd0}) - {b2_pkh[11:0], 20'd0};
                 end
                 b2_off2 <= b2_off;   b2_rotF2 <= b2_rotF;   b2_prot2 <= b2_prot;
                 b2_off3 <= b2_off2;  b2_rotF3 <= b2_rotF2;  b2_prot3 <= b2_prot2;
-                // pv[5]: b2_prodr = (da >> 15) * mulT registered in between
-                if (pv[5])
-                    b2_s32 <= {pp_pk[5][2:0], 29'd0} + b2_prodr[31:0];
-                if (pv[6]) begin : b2w
+                // pv[6]: b2_prodr = (da >> 15) * mulT registered in between
+                if (pv[6])
+                    b2_s32 <= {pp_pk[6][2:0], 29'd0} + b2_prodr[31:0];
+                if (pv[7]) begin : b2w
                     reg [15:0] st16;
                     st16 = b2_s32[31:16];
                     dm_we <= 1;
-                    dm_wa <= pp_i[6][9:0];
+                    dm_wa <= pp_i[7][9:0];
                     dm_wd <= cont ? (b2_prot3 - b2_off3 + st16 - b2_rotF3) : -b2_rotF3;
                 end
                 if (k >= {1'b0, P} && pv == 0) begin
