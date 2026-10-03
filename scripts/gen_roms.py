@@ -27,10 +27,11 @@ PV_INV_SCALE = 0           # inverse FFT stages with /2 scaling
 PV_FADE = 64               # reset: old content fade-out / new content fade-in (samples)
 PV_RHO0 = 256              # reset: grains R1/R2 enter from u = PV_RHO0 .. PV_H
 
-# pv_sin.hex : 1025 x 17 bit, round(65536 * sin(2*pi*i/4096)), i = 0..1024 (twiddles,
-#              analysis window wa[j] = (65536 + cos(2*pi*j/4096)) >> 1)
+# pv_sin.hex : 1024 x 17 bit, round(65536 * sin(2*pi*i/4096)), i = 0..1023 (twiddles,
+#              analysis window wa[j] = (65536 + cos(2*pi*j/4096)) >> 1); sin(pi/2) = 65536
+#              is implied (one 1K x 18 block RAM)
 with open(os.path.join(out, "pv_sin.hex"), "w") as f:
-    for i in range(PV_N // 4 + 1):
+    for i in range(PV_N // 4):
         f.write("%05x\n" % int(round(65536 * math.sin(2 * math.pi * i / PV_N))))
 
 # pv_atan.hex : CORDIC angles round(atan(2^-i) / (2*pi) * 2^24), 2^24 = one revolution

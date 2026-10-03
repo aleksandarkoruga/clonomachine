@@ -15,3 +15,15 @@ run: all
 clean:
 	rm -rf obj_dir
 .PHONY: all run clean
+
+# phase-vocoder unit vs model, job by job:  make pv && ./obj_pv/Vpv_unit [file.wav]
+PV_RTL = ../rtl/pv_unit.v
+obj_pv/Vpv_unit: $(PV_RTL) tb_pv.cpp ../model/pv_model.cpp ../model/pv_model.h ../include/sampler_regs.h
+	$(VERILATOR) --cc --exe --build -O3 -j 8 --x-assign 0 --x-initial 0 --Mdir obj_pv \
+	  -Wno-fatal -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-UNUSEDPARAM \
+	  -GSIN_HEX='"../rtl/pv_sin.hex"' -GATAN_HEX='"../rtl/pv_atan.hex"' -GWIN_HEX='"../rtl/pv_win.hex"' \
+	  --public-flat-rw -CFLAGS "-std=c++20 -O2" $(PV_RTL) tb_pv.cpp ../model/pv_model.cpp
+pv: obj_pv/Vpv_unit
+pvrun: pv
+	./obj_pv/Vpv_unit
+.PHONY: pv pvrun

@@ -22,7 +22,8 @@ static bool readHex(const std::string& path, uint32_t* dst, size_t n) {
 
 bool PvTables::load(const std::string& dir) {
     uint32_t w[2 * PV_H + 1 + 3 * PV_H + PV_FADE];
-    if (!readHex(dir + "/pv_sin.hex", sin, PV_N / 4 + 1) || !readHex(dir + "/pv_atan.hex", atan, PV_CORDIC_ITER)
+    sin[PV_N / 4] = 65536;
+    if (!readHex(dir + "/pv_sin.hex", sin, PV_N / 4) || !readHex(dir + "/pv_atan.hex", atan, PV_CORDIC_ITER)
         || !readHex(dir + "/pv_win.hex", w, sizeof w / sizeof w[0]))
         return false;
     std::copy(w, w + 2 * PV_H + 1 + 3 * PV_H, win);
@@ -213,7 +214,19 @@ void PvCore::run(const PvJob& job, PvSlotState& st, const std::vector<int16_t>& 
                 P -= F;
         }
     }
+    if (dbg) {
+        std::copy(zr, zr + PV_M, dbg->frameR);
+        std::copy(zi, zi + PV_M, dbg->frameI);
+        dbg->hopIdeal = hopIdeal;
+        dbg->err = err;
+        dbg->hop = hop;
+        dbg->pos = job.pos;
+    }
     fft(false);
+    if (dbg) {
+        std::copy(zr, zr + PV_M, dbg->fftR);
+        std::copy(zi, zi + PV_M, dbg->fftI);
+    }
 
     // ---- pass A: split, CORDIC, log magnitude, frequency rotation ----
     constexpr int MB = PV_LOG2H + 2;
@@ -226,6 +239,10 @@ void PvCore::run(const PvJob& job, PvSlotState& st, const std::vector<int16_t>& 
         const int32_t Xr = sat27(rnd(Er * 65536 + (c * Di - s * Dr), 17));
         const int32_t Xi = sat27(rnd(Ei * 65536 + (-c * Dr - s * Di), 17));
         stats.maxSplit = std::max({stats.maxSplit, std::abs(int64_t(Xr)), std::abs(int64_t(Xi))});
+        if (dbg) {
+            dbg->xr[k] = Xr;
+            dbg->xi[k] = Xi;
+        }
         cordicVector(Xr, Xi, mag[k], phase[k]);
         L[k] = pvLog2(uint32_t(mag[k]));
     }
@@ -234,6 +251,8 @@ void PvCore::run(const PvJob& job, PvSlotState& st, const std::vector<int16_t>& 
         const int64_t ah = std::abs(hopIdeal);
         const int64_t q = ah ? ((int64_t(1) << 33) + ah / 2) / ah : 32768;
         const int32_t mul = -int32_t(std::min<int64_t>(q, 32768));
+        if (dbg)
+            dbg->mul = mul;
         rotF[0] = 0;
         for (int m = 1; m < PV_BINS; ++m) {
             const int16_t d = int16_t(phase[m - 1] - phase[m]);
@@ -288,6 +307,8 @@ void PvCore::run(const PvJob& job, PvSlotState& st, const std::vector<int16_t>& 
         const int32_t dividend = int32_t(PV_H) << 16, divisor = hop * 2;
         if (divisor)
             mulT = (dividend + std::abs(divisor) / 2) / divisor;
+        if (dbg)
+            dbg->mulT = mulT;
         for (auto& p : partials) {
             const int pk = p.peak;
             const int16_t off = int16_t((reverse ? -phase[pk] : phase[pk]) - (st.pHop < 0 ? -st.pPhase[pk] : st.pPhase[pk]));
@@ -311,6 +332,20 @@ void PvCore::run(const PvJob& job, PvSlotState& st, const std::vector<int16_t>& 
             rot[n] = int16_t(rotF[n] + partials[i].delta);
         }
         rot[PV_M] = rot[PV_M - 1];
+    }
+    if (dbg) {
+        std::copy(mag, mag + PV_BINS, dbg->mag);
+        std::copy(L, L + PV_BINS, dbg->L);
+        std::copy(phase, phase + PV_BINS, dbg->phase);
+        std::copy(rotF, rotF + PV_BINS, dbg->rotF);
+        std::copy(rot, rot + PV_BINS, dbg->rot);
+        dbg->P = P;
+        dbg->strongest = strongest;
+        for (int i = 0; i < P && i < 1024; ++i) {
+            dbg->peak[i] = partials[i].peak;
+            dbg->end[i] = partials[i].end;
+            dbg->delta[i] = partials[i].delta;
+        }
     }
     static int32_t xr[PV_BINS], xi[PV_BINS];
     for (int k = 0; k < PV_BINS; ++k) {
@@ -337,7 +372,15 @@ void PvCore::run(const PvJob& job, PvSlotState& st, const std::vector<int16_t>& 
     st.pErr = err;
     st.pHop = hop;
 
+    if (dbg) {
+        std::copy(zr, zr + PV_M, dbg->zr);
+        std::copy(zi, zi + PV_M, dbg->zi);
+    }
     fft(true);
+    if (dbg) {
+        std::copy(zr, zr + PV_M, dbg->ifftR);
+        std::copy(zi, zi + PV_M, dbg->ifftI);
+    }
     // frame y(t), t = -2H .. 2H-1 (time index j = t mod N, z[n] = y[2n] + j y[2n+1])
     for (int t = -2 * PV_H; t < 2 * PV_H; ++t) {
         const uint32_t j = uint32_t(t) & (PV_N - 1);

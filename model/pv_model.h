@@ -73,8 +73,25 @@ struct PvStats {
     int partials = 0;
 };
 
+// Optional snapshots of every intermediate stage (testbench debugging).
+struct PvDebug {
+    int32_t frameR[PV_M], frameI[PV_M];   // packed frame (natural order)
+    int32_t fftR[PV_M], fftI[PV_M];       // after the forward FFT (bit-reversed order)
+    int32_t xr[PV_BINS], xi[PV_BINS];     // split spectrum
+    int32_t mag[PV_BINS];
+    uint16_t L[PV_BINS];
+    int16_t phase[PV_BINS], rotF[PV_BINS], rot[PV_BINS];
+    int peak[1024], end[1024], P = 0, strongest = 0;
+    int16_t delta[1024];
+    int32_t zr[PV_M], zi[PV_M];           // merged spectrum (natural order)
+    int32_t ifftR[PV_M], ifftI[PV_M];     // after the inverse FFT (bit-reversed order)
+    int64_t hopIdeal = 0, err = 0, pos = 0;
+    int32_t hop = 0, mul = 0, mulT = 0;
+};
+
 class PvCore {
 public:
+    PvDebug* dbg = nullptr;
     bool loadTables(const std::string& dir) { return tab.load(dir); }
     // Runs one grain: analysis, phase processing, resynthesis. Returns the synthesised
     // frame y(t), t = -2H .. 2H-1 (index t + 2H), before the synthesis window.
