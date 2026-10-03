@@ -1,7 +1,8 @@
 # ULX3S-85F time-stretching sampler
 
-Implementation of `ULX3S_Sampler_Handoff.md` (phase 1): BufGrainPlay-style OLA/granular
-engine in fabric, VexRiscv/LiteX SoC, SD sample library, OSC control, ΔΣ audio out.
+BufGrainPlay grain engine and a Bungee
+phase vocoder in fabric (per slot, switchable live), VexRiscv/LiteX SoC, SD sample
+library, OSC control, ΔΣ audio out.
 
 ```bash
 . ./env.sh          # tools/ (yosys, nextpnr, verilator, openFPGALoader, riscv gcc) + .venv (LiteX)
@@ -14,11 +15,12 @@ revisions in use are pinned in `deps.lock`.
 
 | Path | What |
 |---|---|
-| `rtl/sampler_engine.v` | audio engine: 2 slots × 32 grains, per-grain SDRAM line cache, gate, stutter, mixer |
+| `rtl/sampler_engine.v` | audio engine: 2 slots × 32 grains, per-grain SDRAM line cache, gate, stutter, latency line, algorithm crossfade, mixer |
+| `rtl/pv_unit.v` | phase vocoder (Bungee Basic) shared by the slots: FFT, CORDIC, partials, overlap-add rings |
 | `rtl/dsm_dac.v` | 2nd-order ΔΣ → 4-bit R-2R (mode 0) or 1-bit (mode 1), OSR 256 |
-| `rtl/*.hex` | Hann / 2^x ROMs (`scripts/gen_roms.py`) |
-| `model/` | bit-exact C++ golden model + comparison against the float BufGrainPlay |
-| `sim/` | Verilator: RTL vs model (`make run`), DSM spectrum test |
+| `rtl/*.hex` | Hann / 2^x / PV sine, CORDIC, synthesis-window ROMs (`scripts/gen_roms.py`) |
+| `model/` | bit-exact C++ golden models (engine, `pv_model`), float references (BufGrainPlay, `pv_float` = Bungee), `pv_render`, `test_pv_engine` |
+| `sim/` | Verilator: RTL vs model (`make run`), PV unit job by job (`make pvrun`), DSM spectrum test |
 | `include/sampler_regs.h` | engine register map (RTL, model, firmware) |
 | `include/sampler_events.h` | 8-byte control events + SLIP/CRC framing + RAW_PARAM ids |
 | `soc/ulx3s_sampler.py` | LiteX SoC (VexRiscv, SDRAM, SD, SPI flash, ESP32-S3 UART, sampler) |
@@ -36,6 +38,9 @@ python host/ftdi_console.py -i                      # shell (status, list, buf, 
 python host/osc_bridge.py                           # OSC udp:57130 -> board, 1 Mbaud (see host/sampler_example.scd)
 python host/osc_stress.py                           # Monomachine-like load test against the bridge
 cd sim && make run                                  # RTL == model regression
+cd sim && make pvrun                                # pv_unit == pv_model, job by job, all stages
+g++ -O2 -std=c++20 -fwrapv -DPV_RTL_DIR=\"$PWD/rtl\" -o pv_render model/pv_render.cpp model/pv_float.cpp model/pv_model.cpp
+./pv_render in.wav out_float.wav --speed 0.5 --pitch 3 --loop --fixed out_fpga.wav   # offline PV renders
 ```
 
 The console and loader talk to the FT231X over libusb (pyftdi) because openFPGALoader
@@ -56,13 +61,20 @@ FAT32 or exFAT, MBR or GPT. Folders are libraries: `/drums` → slot 0, `/melody
   only new or changed files are parsed (731 files index in ~1.2 s).
 - **Seamless switching:** every grain keeps reading the buffer it started in, the playhead
   moves to the same sixteenth of the bar in the new loop: switches crossfade, no gap.
+- **Transients:** `<dir>/.smptr` caches up to 32 onsets per WAV, found when a sample is
+  first loaded (`list` shows the count); used by `noteMode` 1/2.
 
 ## Behaviour notes (design decisions)
 
-- One time-domain algorithm (BufGrainPlay): "OLA stretch" and "granular" are only
-  parameter values. `/slot/n/` names = BufGrainPlay arguments (`bufNum pos rate pitch
-  grainDur overlap prob separation randPos randomPitch`); `pos` ≥ 0 pins, < 0 runs free.
-  FFT phase vocoder / paulstretch: later, as separate blocks.
+- Grain engine = BufGrainPlay: "OLA stretch" and "granular" are only parameter values.
+  `/slot/n/` names = BufGrainPlay arguments (`bufNum pos rate pitch grainDur overlap prob
+  separation randPos randomPitch`); `pos` ≥ 0 pins, < 0 runs free.
+- `/slot/n/algo 1`: phase vocoder (Bungee Basic) with the same rate/pitch/pos/gate
+  semantics; switches live with a 5 ms crossfade. Every slot output has a constant
+  2.7 ms latency (the PV start-up time), so grain and PV slots stay in sync. Pinned pos +
+  PV = spectral freeze. Paulstretch: next.
+- `/slot/n/noteMode`: 0 note → equal 16ths (as SC), 1 note k → k-th transient, 2 16ths
+  snapped to the nearest transient.
 - Gate: `(CC10+1)/32` bar in real time (`240/bpm` s per bar, measured engine rate),
   identical for every loop at a given bpm.
 - Stutter: TRIG latches POS; `REPEATS` retrigger pulses every `INTERVAL` samples

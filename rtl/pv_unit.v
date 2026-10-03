@@ -273,7 +273,16 @@ module pv_unit #(
     reg  [26:0] jrate;
     reg  [23:0] jbase, jframes;
     wire [55:0] F = {jframes, 32'd0};
-    wire signed [47:0] ahinc = jahead * jinc;
+    // Dedicated, always-active registered multipliers (yosys cannot share them, and no
+    // block-RAM output feeds a multiplier directly).
+    reg  signed [47:0] ahinc;
+    reg  signed [27:0] fd_a;
+    reg  [16:0] fd_b;
+    reg  signed [45:0] fd_p;
+    always @(posedge clk)
+        fd_p <= fd_a * $signed({1'b0, fd_b});
+    always @(posedge clk)
+        ahinc <= jahead * jinc;            // valid two cycles after a job is taken (P_CATCH, P_TAKE)
 
     // lazy ring clearing
     reg  [31:0] clp   [0:NS-1];         // entries for samples < clp are cleared
@@ -471,14 +480,19 @@ module pv_unit #(
     wire [15:0] c_s1 = c_n1 ? c_s0 + 1'b1 : c_s0;
     wire        c_ok = ct < 13'd4096 && (fillSeq - c_s1) != 0 && $signed(fillSeq - c_s1) > 0;
     // consume pipeline
-    reg         fr_v1, fr_v2, fr_v3, fr_v4;
-    reg  [15:0] fr_fr1, fr_fr2;
-    reg  [11:0] fr_j1, fr_j2, fr_j3, fr_j4;
+    reg         fr_v1, fr_v2, fr_v3, fr_v4, fr_v5, fr_v6;
+    reg  [15:0] fr_fr1, fr_fr2, fr_frq;
+    reg  [11:0] fr_j1, fr_j2, fr_j3, fr_j4, fr_j5, fr_j6;
+    reg  [15:0] fr_s0, fr_s1, fr_s0b;
+    reg  [16:0] fr_w, fr_wb;
     reg  signed [16:0] fr_s;
-    reg  signed [33:0] fr_xw;
     reg  signed [26:0] fr_even;
-    wire signed [16:0] fr_d   = $signed({lb1_q[15], lb1_q} - {lb0_q[15], lb0_q});
-    wire signed [33:0] fr_ip  = fr_d * $signed({1'b0, fr_fr2});
+    reg  signed [33:0] fr_ip, fr_xw;
+    wire signed [16:0] fr_d   = $signed({fr_s1[15], fr_s1} - {fr_s0[15], fr_s0});
+    always @(posedge clk) begin
+        fr_ip <= fr_d * $signed({1'b0, fr_frq});           // v3
+        fr_xw <= fr_s * $signed({1'b0, fr_wb});            // v5
+    end
     wire signed [33:0] fr_xwr = (fr_xw + 34'sd64) >>> 7;
 
     // ---------------------------------------------------------------- FFT control
@@ -535,12 +549,15 @@ module pv_unit #(
     reg  [12:0] t13;
     reg  [12:0] ocnt;
     reg  signed [44:0] o_prod;
-    reg  signed [27:0] o_y;
-    reg  [3:0]  ov;  // OLA tokens
-    reg  [11:0] o_addr [0:3];
-    reg  [31:0] o_time [0:3];
+    reg  signed [26:0] o_y;
+    reg  [4:0]  ov;  // OLA tokens
+    reg  [11:0] o_addr [0:4];
+    reg  [31:0] o_time [0:4];
+    reg  [10:0] o_las [0:4];
     reg  [16:0] o_w;
     reg         o_wv;
+    always @(posedge clk)
+        o_prod <= o_y * $signed({1'b0, o_w});
 
     // pass-local scratch for the setup
     reg  signed [57:0] s_sum;
@@ -549,26 +566,40 @@ module pv_unit #(
     reg  signed [43:0] s_e;
     reg  signed [43:0] s_er;
     wire signed [33:0] fracneg = -$signed({2'b00, pos[31:0]});
+    reg  signed [45:0] erate;
+    always @(posedge clk)
+        erate <= err * $signed({1'b0, jrate});
     wire signed [41:0] ahopi_s = hopi < 0 ? -hopi : hopi;   // |hopIdeal| (separate: keep it signed)
     wire [41:0] ahopi = ahopi_s;
     wire signed [27:0] ahop_s = hop < 0 ? -hop : hop;
     wire [27:0] ahop = ahop_s;
 
     // B2 / C2 pipelines
-    reg  [5:0]  pv;                      // generic valid pipeline
-    reg  [11:0] pp_pk [0:5];
-    reg  [10:0] pp_i [0:5];
+    reg  [6:0]  pv;                      // generic valid pipeline
+    reg  [11:0] pp_pk [0:6];
+    reg  [10:0] pp_i [0:6];
     reg  signed [15:0] b2_off, b2_rotF, b2_prot;
-    reg  signed [15:0] b2_off2, b2_rotF2, b2_prot2;
+    reg  signed [15:0] b2_off2, b2_rotF2, b2_prot2, b2_off3, b2_rotF3, b2_prot3;
     wire signed [16:0] b2_dsh  = $signed(b2_da) >>> 15;
-    wire signed [42:0] b2_prod = b2_dsh * tmul;
+    reg  signed [42:0] b2_prodr;
+    reg  [23:0] b2_pkh;
+    always @(posedge clk) begin
+        b2_pkh   <= pp_pk[2] * hop[11:0];   // only the low 12 bits matter (a = hop << 20)
+        b2_prodr <= b2_dsh * tmul;
+    end
     reg  [31:0] b2_da;
     reg  [31:0] b2_s32;
     reg  [15:0] b2_dl;
 
-    // A1 pipeline
-    reg  [26:0] a1_mag;
-    reg  [15:0] a1_ph, a1_Lv;
+    // A1 output pipeline
+    reg  [2:0]  a1v;
+    reg  [26:0] a1s_mag, a1t_mag, a1u_mag;
+    reg  [15:0] a1s_ph, a1t_ph, a1u_ph, a1t_L, a1u_L, a1u_d;
+    reg  [11:0] a1s_tag, a1t_tag, a1u_tag;
+    reg  [15:0] a1_dm;
+    reg  signed [32:0] a1_prod;
+    always @(posedge clk)
+        a1_prod <= $signed(a1_dm) * fmul;   // (d * mul), bits 23:8 = int16(x >> 8)
 
     // C2
 
@@ -578,11 +609,10 @@ module pv_unit #(
     // OLA pipeline
     reg  signed [26:0] o_yr, o_yi;
     reg         ol_odd;
-    reg         o_mk [0:3];
-    reg         o_odd [0:3];
-    reg  [10:0] o_la, o_lap;
-    reg  signed [27:0] o_rq;
-    reg         o_wen;
+    reg         o_mk [0:4];
+    reg         o_odd [0:4];
+    reg  signed [27:0] o_rq, o_rq2;
+    reg         o_wen, o_wen2;
     // pipelined passes
     reg  [11:0] q;
     reg  [5:0]  a0v, a0b;
@@ -798,8 +828,7 @@ module pv_unit #(
                 6: if (!dv_busy) begin
                     tmul <= (hop == 0) ? 26'sd0 : (hop < 0 ? -$signed({1'b0, dv_q[24:0]}) : $signed({1'b0, dv_q[24:0]}));
                     // frame start P0 = (pos + (err*rate >> 8) - (2048*rate << 8)) mod F
-                    s_sum <= $signed({2'b00, pos}) + (($signed(err) * $signed({1'b0, jrate})) >>> 8)
-                           - $signed({12'd0, jrate, 19'd0});
+                    s_sum <= $signed({2'b00, pos}) + (erate >>> 8) - $signed({12'd0, jrate, 19'd0});
                     sub <= 7;
                 end
                 7: begin
@@ -827,7 +856,7 @@ module pv_unit #(
                 cSeq <= fillSeq;
                 cOld <= fillSeq;
                 fHalf <= 0;
-                fr_v1 <= 0; fr_v2 <= 0; fr_v3 <= 0; fr_v4 <= 0;
+                fr_v1 <= 0; fr_v2 <= 0; fr_v3 <= 0; fr_v4 <= 0; fr_v5 <= 0; fr_v6 <= 0;
                 ph <= P_FRAME;
             end
             // ============================================================ frame
@@ -864,28 +893,42 @@ module pv_unit #(
                     ct <= ct + 1'b1;
                     cP <= ({1'b0, cP} + step_q >= {1'b0, F}) ? cP + step_q - F : cP + step_q;
                 end
-                // pipeline: v1 RAM addr -> v2 data -> v3 interpolated -> v4 windowed
+                // pipeline: v1 RAM address -> v2 samples registered -> v3 (s1-s0)*fr, window
+                // -> v4 interpolated sample -> v5 windowed product -> v6 round, pair, write
                 fr_v2 <= fr_v1;
                 fr_fr2 <= fr_fr1;
                 fr_j2 <= fr_j1;
                 fr_v3 <= fr_v2;
                 fr_j3 <= fr_j2;
-                if (fr_v2)
-                    fr_s <= $signed(lb0_q) + (fr_ip >>> 16);
                 fr_v4 <= fr_v3;
                 fr_j4 <= fr_j3;
-                if (fr_v3)
-                    fr_xw <= fr_s * $signed({1'b0, (18'd65536 + cs_c) >> 1});
+                fr_v5 <= fr_v4;
+                fr_j5 <= fr_j4;
+                fr_v6 <= fr_v5;
+                fr_j6 <= fr_j5;
+                if (fr_v2) begin
+                    fr_s0 <= lb0_q;
+                    fr_s1 <= lb1_q;
+                    fr_frq <= fr_fr2;
+                end
+                if (fr_v3) begin
+                    fr_s0b <= fr_s0;
+                    fr_w <= (18'd65536 + cs_c) >> 1;
+                end
                 if (fr_v4) begin
-                    if (!fr_j4[0])
+                    fr_s <= $signed(fr_s0b) + (fr_ip >>> 16);
+                    fr_wb <= fr_w;
+                end
+                if (fr_v6) begin
+                    if (!fr_j6[0])
                         fr_even <= fr_xwr[26:0];
                     else begin
-                        bk_we[bsel(fr_j4[11:1])] <= 1;
-                        bk_wa[bsel(fr_j4[11:1])] <= fr_j4[10:2];
-                        bk_wd[bsel(fr_j4[11:1])] <= {fr_even, fr_xwr[26:0]};
+                        bk_we[bsel(fr_j6[11:1])] <= 1;
+                        bk_wa[bsel(fr_j6[11:1])] <= fr_j6[10:2];
+                        bk_wd[bsel(fr_j6[11:1])] <= {fr_even, fr_xwr[26:0]};
                     end
                 end
-                if (ct == 13'd4096 && !fr_v1 && !fr_v2 && !fr_v3 && !fr_v4) begin
+                if (ct == 13'd4096 && !fr_v1 && !fr_v2 && !fr_v3 && !fr_v4 && !fr_v5 && !fr_v6) begin
                     ph <= P_FFT;
                     inv <= 0;
                     st <= 0;
@@ -1099,7 +1142,7 @@ module pv_unit #(
             // ============================================================ A1
             P_A1: begin
                 // issue: read X[k] (Nyquist from register) into the CORDIC
-                pv <= {pv[4:0], 1'b0};
+                pv <= {pv[5:0], 1'b0};
                 if (k <= 12'd2048 && pc == 0) begin
                     begin : rdX
                         reg [10:0] la;
@@ -1110,7 +1153,7 @@ module pv_unit #(
                     pv[0] <= 1;
                     k <= k + 1'b1;
                 end
-                for (ii = 1; ii < 6; ii = ii + 1)
+                for (ii = 1; ii < 7; ii = ii + 1)
                     pp_pk[ii] <= pp_pk[ii-1];
                 if (pv[1]) begin
                     co_in_v <= 1;
@@ -1123,36 +1166,50 @@ module pv_unit #(
                         co_in_y <= bk_q[bsel(rev11(pp_pk[1][10:0]))][26:0];
                     end
                 end
-                // CORDIC output, in bin order
-                if (co_v) begin : a1out
-                    reg [15:0] Lv, d, rf;
-                    reg signed [32:0] x;
-                    Lv = mlog2(co_mag);
-                    if (co_tag == 0) begin
-                        rf = 16'd0;
-                    end else begin
-                        d = a1_prevph - co_ph;
-                        x = ($signed(d) * fmul) >>> 8;
-                        rf = a1_rot + x[15:0] + d;
-                    end
-                    a1_prevph <= co_ph;
+                // CORDIC output, in bin order: s1 register, s2 log2 / phase difference,
+                // s3 product (a1_prod), s4 frequency rotation, cur write, partial enumeration
+                a1v <= {a1v[1:0], co_v};
+                if (co_v) begin
+                    a1s_mag <= co_mag;
+                    a1s_ph <= co_ph;
+                    a1s_tag <= co_tag;
+                end
+                if (a1v[0]) begin
+                    a1t_mag <= a1s_mag;
+                    a1t_ph <= a1s_ph;
+                    a1t_tag <= a1s_tag;
+                    a1t_L <= mlog2(a1s_mag);
+                    a1_dm <= a1_prevph - a1s_ph;
+                    a1_prevph <= a1s_ph;
+                end
+                if (a1v[1]) begin
+                    a1u_mag <= a1t_mag;
+                    a1u_ph <= a1t_ph;
+                    a1u_tag <= a1t_tag;
+                    a1u_L <= a1t_L;
+                    a1u_d <= a1_dm;
+                end
+                if (a1v[2]) begin : a1out
+                    reg [15:0] Lv, rf;
+                    Lv = a1u_L;
+                    rf = (a1u_tag == 0) ? 16'd0 : a1_rot + a1_prod[23:8] + a1u_d;
                     a1_rot <= rf;
-                    if (co_tag == 12'd2048) begin
-                        n_mag <= co_mag; n_L <= Lv; n_ph <= co_ph; n_rotF <= rf;
+                    if (a1u_tag == 12'd2048) begin
+                        n_mag <= a1u_mag; n_L <= Lv; n_ph <= a1u_ph; n_rotF <= rf;
                     end else begin
                         cu_we <= 1;
-                        cu_wa <= co_tag[10:0];
-                        cu_wd <= {co_mag, Lv, co_ph, rf};
+                        cu_wa <= a1u_tag[10:0];
+                        cu_wd <= {a1u_mag, Lv, a1u_ph, rf};
                     end
                     // enumeration window: evaluate m = tag - 1 with e(m) = L[tag-1], e(m+1) = L[tag]
                     a1_L[0] <= Lv;
-                    if (co_tag >= 12'd2)
+                    if (a1u_tag >= 12'd2)
                         begin : enum1
                             reg lt;
                             lt = a1_L[0] < Lv;            // e(m) < e(m+1), m = tag-1 >= 1
                             if (!a1_desc) begin
                                 if (!lt) begin
-                                    a1_peak <= co_tag - 1'b1;
+                                    a1_peak <= a1u_tag - 1'b1;
                                     a1_desc <= 1;
                                     if (a1_cnt == 0 || a1_L[0] > a1_best) begin
                                         a1_best <= a1_L[0];
@@ -1161,12 +1218,12 @@ module pv_unit #(
                                 end
                             end else if (lt) begin
                                 pk_we <= 1; pk_wa <= a1_cnt[9:0]; pk_wd <= a1_peak;
-                                en_we <= 1; en_wa <= a1_cnt[9:0]; en_wd <= co_tag - 1'b1;
+                                en_we <= 1; en_wa <= a1_cnt[9:0]; en_wd <= a1u_tag - 1'b1;
                                 a1_cnt <= a1_cnt + 1'b1;
                                 a1_desc <= 0;
                             end
                         end
-                    if (co_tag == 12'd2048)
+                    if (a1u_tag == 12'd2048)
                         pc <= 1;   // tail: m = 2048 (e(2049) = -1) and m = 2049 (-1 < 0)
                 end
                 if (pc == 1) begin : enumtail
@@ -1254,14 +1311,14 @@ module pv_unit #(
             end
             // ============================================================ B2: phase advance per partial
             P_B2: begin
-                pv <= {pv[4:0], 1'b0};
+                pv <= {pv[5:0], 1'b0};
                 if (k < {1'b0, P} && pc == 0) begin
                     pk_ra <= k[9:0];
                     pp_i[0] <= k[10:0];
                     pv[0] <= 1;
                     k <= k + 1'b1;
                 end
-                for (ii = 1; ii < 6; ii = ii + 1) begin
+                for (ii = 1; ii < 7; ii = ii + 1) begin
                     pp_pk[ii] <= pp_pk[ii-1];
                     pp_i[ii] <= pp_i[ii-1];
                 end
@@ -1271,10 +1328,9 @@ module pv_unit #(
                     hi_ra <= {js, pk_q[10:0]};
                     pp_pk[2] <= pk_q;
                 end
-                // pv[3]: data
+                // pv[3]: data (b2_pkh = peak * hop[11:0] registered meanwhile)
                 if (pv[3]) begin : b2a
                     reg [15:0] phc, rfc, pph, prt;
-                    reg [31:0] aa;
                     phc = pp_pk[3] == 12'd2048 ? n_ph   : cu_q[31:16];
                     rfc = pp_pk[3] == 12'd2048 ? n_rotF : cu_q[15:0];
                     pph = pp_pk[3] == 12'd2048 ? h_nph[js]  : hi_q[31:16];
@@ -1282,21 +1338,19 @@ module pv_unit #(
                     b2_off <= (rev ? -phc : phc) - (prev_rev ? -pph : pph);
                     b2_rotF <= rfc;
                     b2_prot <= prt;
-                    aa = {hop[11:0], 20'd0};
-                    b2_da <= ({phc, 16'd0} - {pph, 16'd0}) - pp_pk[3] * aa;
+                    b2_da <= ({phc, 16'd0} - {pph, 16'd0}) - {b2_pkh[11:0], 20'd0};
                 end
-                if (pv[4]) begin
-                    b2_s32 <= {pp_pk[4][2:0], 29'd0} + b2_prod[31:0];
-                    b2_off2 <= b2_off;
-                    b2_rotF2 <= b2_rotF;
-                    b2_prot2 <= b2_prot;
-                end
-                if (pv[5]) begin : b2w
+                b2_off2 <= b2_off;   b2_rotF2 <= b2_rotF;   b2_prot2 <= b2_prot;
+                b2_off3 <= b2_off2;  b2_rotF3 <= b2_rotF2;  b2_prot3 <= b2_prot2;
+                // pv[5]: b2_prodr = (da >> 15) * mulT registered in between
+                if (pv[5])
+                    b2_s32 <= {pp_pk[5][2:0], 29'd0} + b2_prodr[31:0];
+                if (pv[6]) begin : b2w
                     reg [15:0] st16;
                     st16 = b2_s32[31:16];
                     dm_we <= 1;
-                    dm_wa <= pp_i[5][9:0];
-                    dm_wd <= cont ? (b2_prot2 - b2_off2 + st16 - b2_rotF2) : -b2_rotF2;
+                    dm_wa <= pp_i[6][9:0];
+                    dm_wd <= cont ? (b2_prot3 - b2_off3 + st16 - b2_rotF3) : -b2_rotF3;
                 end
                 if (k >= {1'b0, P} && pv == 0) begin
                     ph <= P_C1;
@@ -1471,9 +1525,15 @@ module pv_unit #(
                 end
                 1: pc <= 2;
                 2: begin
+                    fd_a <= rg_q;
+                    fd_b <= wr_d;
+                    pc <= 3;
+                end
+                3: pc <= 4;            // fd_p = fd_a * fd_b
+                4: begin
                     rg_we <= 1;
                     rg_wa <= {js, jc[11:0] + t13[11:0]};
-                    rg_wd <= ($signed(rg_q) * $signed({1'b0, wr_d}) + 46'sd32768) >>> 16;
+                    rg_wd <= (fd_p + 46'sd32768) >>> 16;
                     if (t13 == FADE - 1) begin
                         ph <= P_CLR;
                         t13 <= FADE;
@@ -1497,69 +1557,67 @@ module pv_unit #(
                     t13 <= t13 + 1'b1;
             end
             // ============================================================ OLA
-            // sample s = t + 1024, 2 cycles per sample: even cycles read ring / window,
-            // odd cycles write the sample read two cycles before
+            // sample s = t + 1024, one every 2 cycles: T read ring / window / element,
+            // T+2 register them, T+3 product (o_prod), T+4 sum and write
             P_OLA: begin
                 ol_odd <= !ol_odd;
-                ov <= {ov[2:0], 1'b0};
-                for (ii = 1; ii < 4; ii = ii + 1) begin
+                ov <= {ov[3:0], 1'b0};
+                for (ii = 1; ii < 5; ii = ii + 1) begin
                     o_addr[ii] <= o_addr[ii-1];
                     o_time[ii] <= o_time[ii-1];
                     o_mk[ii] <= o_mk[ii-1];
                     o_odd[ii] <= o_odd[ii-1];
+                    o_las[ii] <= o_las[ii-1];
                 end
-                if (!ol_odd) begin
-                    if (t13 < 13'd2048) begin : oiss
-                        reg signed [12:0] t, u;
-                        reg [12:0] at;
-                        reg [11:0] wa, j;
-                        reg [10:0] la;
-                        t = $signed({1'b0, t13}) - 13'sd1024;
-                        at = t < 0 ? -t : t;
-                        case (jwin)
-                        2'd1: begin u = t;        wa = t < 0 ? 12'd0 : (t < 512 ? 12'd1025 + t : at); end
-                        2'd2: begin u = t + 512;  wa = u < 0 ? 12'd0 : (u < 512 ? 12'd1537 + u : at); end
-                        2'd3: begin u = t + 1024; wa = u < 512 ? 12'd2049 + u : at; end
-                        default: begin u = 0;     wa = at; end
-                        endcase
-                        wr_a <= wa;
-                        rg_a <= {js, jc[11:0] + t[11:0]};
-                        rg_rv <= 1;
-                        j = t[11:0];
-                        la = rev11(j[11:1]);
-                        if (!t13[0]) begin
-                            bk_ra[0] <= la[9:1]; bk_ra[1] <= la[9:1]; bk_ra[2] <= la[9:1]; bk_ra[3] <= la[9:1];
-                        end
-                        ov[0] <= 1;
-                        o_addr[0] <= jc[11:0] + t[11:0];
-                        o_time[0] <= jc + {{19{t[12]}}, t};
-                        o_mk[0] <= (jwin == 2'd1 && t < 0) || (jwin == 2'd2 && u < 0);
-                        o_odd[0] <= t13[0];
-                        o_la <= la;
-                        t13 <= t13 + 1'b1;
+                if (!ol_odd && t13 < 13'd2048) begin : oiss
+                    reg signed [12:0] t, u;
+                    reg [12:0] at;
+                    reg [11:0] wa, j;
+                    reg [10:0] la;
+                    t = $signed({1'b0, t13}) - 13'sd1024;
+                    at = t < 0 ? -t : t;
+                    case (jwin)
+                    2'd1: begin u = t;        wa = t < 0 ? 12'd0 : (t < 512 ? 12'd1025 + t : at); end
+                    2'd2: begin u = t + 512;  wa = u < 0 ? 12'd0 : (u < 512 ? 12'd1537 + u : at); end
+                    2'd3: begin u = t + 1024; wa = u < 512 ? 12'd2049 + u : at; end
+                    default: begin u = 0;     wa = at; end
+                    endcase
+                    wr_a <= wa;
+                    rg_a <= {js, jc[11:0] + t[11:0]};
+                    rg_rv <= 1;
+                    j = t[11:0];
+                    la = rev11(j[11:1]);
+                    if (!t13[0]) begin
+                        bk_ra[0] <= la[9:1]; bk_ra[1] <= la[9:1]; bk_ra[2] <= la[9:1]; bk_ra[3] <= la[9:1];
                     end
-                    // capture the sample read two cycles ago (token in stage 1)
-                    if (ov[1]) begin : ocap
-                        reg signed [26:0] y;
-                        if (!o_odd[1]) begin
-                            y = bk_q[bsel(o_la)][53:27];
-                            o_yi <= bk_q[bsel(o_la)][26:0];
-                        end else
-                            y = o_yi;
-                        o_prod <= y * $signed({1'b0, wr_d});
-                        o_rq <= rg_q;
-                        o_wen <= !o_mk[1] && wr_d != 0 && $signed(o_time[1] - now) > 0;
-                    end
-                    o_lap <= o_la;
-                end else begin
-                    if (ov[2]) begin
-                        rg_wa <= {js, o_addr[2]};
-                        rg_we <= o_wen;
-                        rg_wd <= o_rq + ((o_prod + 45'sd131072) >>> 18);
-                    end
-                    if (t13 == 13'd2048 && ov[1:0] == 0 && !ov[2])
-                        ph <= P_DONE;
+                    ov[0] <= 1;
+                    o_addr[0] <= jc[11:0] + t[11:0];
+                    o_time[0] <= jc + {{19{t[12]}}, t};
+                    o_mk[0] <= (jwin == 2'd1 && t < 0) || (jwin == 2'd2 && u < 0);
+                    o_odd[0] <= t13[0];
+                    o_las[0] <= la;
+                    t13 <= t13 + 1'b1;
                 end
+                if (ov[1]) begin
+                    // RAM / ROM outputs of the sample read two cycles ago
+                    if (!o_odd[1]) begin
+                        o_y <= bk_q[bsel(o_las[1])][53:27];
+                        o_yi <= bk_q[bsel(o_las[1])][26:0];
+                    end else
+                        o_y <= o_yi;
+                    o_w <= wr_d;
+                    o_rq <= rg_q;
+                    o_wen <= !o_mk[1] && wr_d != 0 && $signed(o_time[1] - now) > 0;
+                end
+                o_rq2 <= o_rq;
+                o_wen2 <= o_wen;
+                if (ov[3]) begin
+                    rg_wa <= {js, o_addr[3]};
+                    rg_we <= o_wen2;
+                    rg_wd <= o_rq2 + ((o_prod + 45'sd131072) >>> 18);
+                end
+                if (t13 == 13'd2048 && ov == 0)
+                    ph <= P_DONE;
             end
             // ============================================================ clear job
             P_CLEAR: begin
