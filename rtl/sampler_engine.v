@@ -11,6 +11,11 @@
 //   out_*   one mono s24 sample (Q8 sample units) per sample period
 //   stat_*  status words, streamed out while idle (into a dual-clock RAM)
 //
+// Phase vocoder (rtl/pv_unit.v) per slot, selected by ALGO: every slot output is delayed
+// by SMP_LATENCY samples and crossfaded between the grain path and the PV path (see
+// Engine::mixSlot in the model). The PV unit shares the line request/fill path; grain
+// requests have priority, fills are routed by a tag FIFO.
+//
 // Line cache: every grain owns two 64-sample lines of a cache RAM. Line L of a buffer
 // covers SDRAM words BASE + 64L .. BASE + 64L + 63, i.e. buffer samples 64L-64 .. 64L-1
 // (pre-pad of 64). A grain reading sample index i needs lines {B, B+1} with
@@ -24,7 +29,10 @@ module sampler_engine #(
     parameter SLOT_BITS         = 1,          // >= clog2(N_SLOTS), >= 1
     parameter CYCLES_PER_SAMPLE = 1024,
     parameter HANN_HEX          = "hann.hex",
-    parameter EXP2_HEX          = "exp2.hex"
+    parameter EXP2_HEX          = "exp2.hex",
+    parameter PV_SIN_HEX        = "pv_sin.hex",
+    parameter PV_ATAN_HEX       = "pv_atan.hex",
+    parameter PV_WIN_HEX        = "pv_win.hex"
 ) (
     input  wire               clk,
     input  wire               rst,
@@ -83,6 +91,17 @@ module sampler_engine #(
         end
     endfunction
 
+    function [26:0] pvrate;                  // PV read rate: |PITCH| clamped to [1/16, 4]
+        input [31:0] p;
+        reg [31:0] a;
+        begin
+            a = p[31] ? -p : p;
+            if (a > 32'd67108864)     pvrate = 27'd67108864;
+            else if (a < 32'd1048576) pvrate = 27'd1048576;
+            else                      pvrate = a[26:0];
+        end
+    endfunction
+
     function [5:0] popcount32;
         input [31:0] x;
         integer k;
@@ -122,7 +141,8 @@ module sampler_engine #(
     reg [6:0]  r_repeats  [0:N_SLOTS-1];
     reg [13:0] r_interval [0:N_SLOTS-1];
     reg [15:0] r_amp      [0:N_SLOTS-1];
-    reg [15:0] r_algo     [0:N_SLOTS-1];
+    reg [15:0] r_algo     [0:N_SLOTS-1];   // ALGO_AMP
+    reg [2:0]  r_algosel  [0:N_SLOTS-1];   // ALGO: [1:0] algorithm, [2] PV no transient
     reg [4:0]  pend_stb   [0:N_SLOTS-1];
     reg [15:0] g_master;
     reg [31:0] g_beatinc;
@@ -232,7 +252,9 @@ module sampler_engine #(
         ST_O3     = 6'd36, ST_O4     = 6'd37, ST_O5     = 6'd38, ST_O6     = 6'd39,
         ST_WRAP   = 6'd40, ST_ALLOC  = 6'd41, ST_PH     = 6'd42, ST_ENV    = 6'd48, ST_OUT0   = 6'd49, ST_OUT1   = 6'd50, ST_OUT2   = 6'd51,
         ST_OUT3   = 6'd52, ST_NEXT   = 6'd53, ST_MIX0   = 6'd54, ST_MIX1   = 6'd55,
-        ST_MULW   = 6'd56, ST_E4B    = 6'd58, ST_G1B    = 6'd59, ST_G3B    = 6'd60, ST_SLOT2  = 6'd61;
+        ST_MULW   = 6'd56, ST_E4B    = 6'd58, ST_G1B    = 6'd59, ST_G3B    = 6'd60, ST_SLOT2  = 6'd61,
+        ST_PV0    = 6'd43, ST_PVJ    = 6'd44, ST_PVE    = 6'd45, ST_PVM0   = 6'd46, ST_PVM1   = 6'd47,
+        ST_PVM2   = 6'd57, ST_PVM3   = 6'd62, ST_PVM4   = 6'd63;
 
     reg  [5:0]  state, mret;
     reg  [1:0]  mcnt;
@@ -335,10 +357,97 @@ module sampler_engine #(
     wire [18:0]  e_tB     = e_fresh ? 19'h7FFFF : (e_b[0] ? e_trow[18:0]  : e_trow[37:19]);
     wire [18:0]  e_lb     = e_la + 19'd1;
 
-    assign req_valid = pend_ok && ((state == ST_ENS1 && e_na) || (state == ST_ENS2 && e_nb));
-    assign req_addr  = {1'b0, e_base}
+    wire   g_req_valid = pend_ok && ((state == ST_ENS1 && e_na) || (state == ST_ENS2 && e_nb));
+    wire [24:0] g_req_addr = {1'b0, e_base}
                      + {((state == ST_ENS1) ? e_la : e_lb), 6'd0};
-    wire   req_fire  = req_valid && req_ready;
+    wire   req_fire  = g_req_valid && req_ready;
+
+    // ---- request arbitration (grain engine first) and fill routing by tag
+    wire        pv_req_valid;
+    wire [24:0] pv_req_addr;
+    assign req_valid = g_req_valid || pv_req_valid;
+    assign req_addr  = g_req_valid ? g_req_addr : pv_req_addr;
+    wire        pv_req_ready = req_ready && !g_req_valid;
+    reg         tagq [0:127];            // 1: PV line
+    reg  [6:0]  tq_wp, tq_rp;
+    reg  [5:0]  tq_w;
+    wire        tq_head = tagq[tq_rp];
+    wire        fill_g  = fill_valid && !tq_head;
+    wire        fill_p  = fill_valid && tq_head;
+    always @(posedge clk) begin
+        if (rst) begin
+            tq_wp <= 0;
+            tq_rp <= 0;
+            tq_w  <= 0;
+        end else begin
+            if (req_valid && req_ready) begin
+                tagq[tq_wp] <= !g_req_valid;
+                tq_wp <= tq_wp + 1'b1;
+            end
+            if (fill_valid) begin
+                tq_w <= tq_w + 1'b1;
+                if (tq_w == 6'd63)
+                    tq_rp <= tq_rp + 1'b1;
+            end
+        end
+    end
+
+    // ---- phase vocoder
+    reg              pj_valid, pj_clear, pj_reset, pj_notr;
+    reg  [SLOT_BITS-1:0] pj_slot;
+    reg  [1:0]       pj_win;
+    reg  [31:0]      pj_c, pj_dl;
+    reg  [55:0]      pj_ph;
+    reg  signed [15:0] pj_ahead;
+    reg  signed [31:0] pj_inc;
+    reg  [26:0]      pj_rate;
+    reg  [23:0]      pj_base, pj_frames;
+    wire             pj_ready;
+    reg              em_req;
+    wire             em_ack;
+    wire signed [27:0] em_q;
+    wire [N_SLOTS-1:0] pv_clr_busy;
+    wire [31:0]      pv_misses;
+    reg  [31:0]      pv_drops;
+    pv_unit #(.NS(N_SLOTS), .SB(SLOT_BITS), .SIN_HEX(PV_SIN_HEX), .ATAN_HEX(PV_ATAN_HEX), .WIN_HEX(PV_WIN_HEX)) u_pv (
+        .clk(clk), .rst(rst), .now(samples),
+        .job_valid(pj_valid), .job_ready(pj_ready), .job_slot(pj_slot), .job_clear(pj_clear),
+        .job_win(pj_win), .job_reset(pj_reset), .job_notr(pj_notr), .job_c(pj_c), .job_dl(pj_dl),
+        .job_ph(pj_ph), .job_ahead(pj_ahead), .job_inc(pj_inc), .job_rate(pj_rate),
+        .job_base(pj_base), .job_frames(pj_frames),
+        .em_req(em_req), .em_slot(cs), .em_addr(samples[11:0]), .em_ack(em_ack), .em_q(em_q),
+        .clr_busy(pv_clr_busy),
+        .req_valid(pv_req_valid), .req_ready(pv_req_ready), .req_addr(pv_req_addr),
+        .fill_valid(fill_p), .fill_data(fill_data),
+        .misses(pv_misses), .busy()
+    );
+    // per-slot PV state
+    reg              pv_act [0:N_SLOTS-1];
+    reg  [1:0]       pv_alg [0:N_SLOTS-1];
+    reg  [31:0]      pv_xfs [0:N_SLOTS-1];
+    reg  [16:0]      pv_x   [0:N_SLOTS-1];
+    reg  [31:0]      pv_nc  [0:N_SLOTS-1];
+    // latency delay line {grain output 24, gate level 17}
+    reg  [40:0]      dlm [0:N_SLOTS*128-1];
+    reg  [SLOT_BITS+6:0] dl_ra, dl_wa;
+    reg              dl_we;
+    reg  [40:0]      dl_wd, dl_q;
+    always @(posedge clk) begin
+        if (dl_we) dlm[dl_wa] <= dl_wd;
+        dl_q <= dlm[dl_ra];
+    end
+    // per-sample scratch of the slot being mixed
+    reg              pvrst, x_en, x_act;
+    reg  [55:0]      pvph;
+    reg  signed [23:0] gq;
+    reg  [1:0]       x_alg, x_nj, x_ji;
+    reg              x_clr;
+    reg  signed [23:0] x_pvs, x_op;
+    reg  signed [23:0] x_gd;
+    reg  [16:0]      x_lvd, x_xn;
+    reg  signed [67:0] x_p1;
+    reg              pj_rs, x_wait;
+    reg  [31:0]      pj_c0, pj_stc;
     wire   req_way   = (state == ST_ENS1) ? e_la[0] : e_lb[0];
 
     assign cmd_ready = (state == ST_IDLE);
@@ -401,6 +510,7 @@ module sampler_engine #(
                     5'd16: r_envdur[sl]   <= cmd_data[23:0];
                     5'd17: r_repeats[sl]  <= cmd_data[6:0];
                     5'd18: r_interval[sl] <= cmd_data[13:0];
+                    5'd19: r_algosel[sl]  <= cmd_data[2:0];
                     5'd20: r_amp[sl]      <= cmd_data[15:0];
                     5'd21: r_algo[sl]     <= cmd_data[15:0];
                     default: ;
@@ -430,6 +540,7 @@ module sampler_engine #(
                         3'd2: stat_data <= {29'd0, s_gst[ss]};
                         3'd3: stat_data <= {16'd0, s_miss[ss]};
                         3'd4: stat_data <= {8'd0, s_out[ss]};
+                        3'd5: stat_data <= {(pv_x[ss] > 17'd65535) ? 16'hFFFF : pv_x[ss][15:0], 15'd0, pv_act[ss]};
                         default: ;
                         endcase
                     end
@@ -441,6 +552,7 @@ module sampler_engine #(
                     6'd59: stat_data <= beat[31:0];
                     6'd60: stat_data <= samples;
                     6'd61: stat_data <= req_drops;
+                    6'd62: stat_data <= pv_misses + pv_drops;
                     6'd63: stat_data <= 32'h534D504C;
                     default: ;
                     endcase
@@ -467,9 +579,10 @@ module sampler_engine #(
                     pb = pb - {1'b0, c_frames, 32'd0};
             end
             if (!c_ctrl[0] || c_frames < 24'd128) begin
-                s_out[cs] <= 0;
                 s_gst[cs] <= 0;
-                state     <= ST_NEXT;
+                gq        <= 24'sd0;
+                pvrst     <= 1'b0;
+                state     <= ST_PV0;
             end else begin
                 s_bgph[cs] <= bg;
                 pos_bg     <= pb[55:0];
@@ -496,6 +609,7 @@ module sampler_engine #(
                     s_stutph[cs] <= s_stutph[cs] + 1'b1;
             end
             trig <= stb[0] | rt;
+            pvrst <= stb[0] | rt | stb[2] | stb[3];        // PV restart: trig, retrig, KILL, SEEK
             if (stb[2]) begin
                 s_active[cs] <= 32'd0;
                 gmask        <= 32'd0;
@@ -648,6 +762,7 @@ module sampler_engine #(
             y <= sat24(mp >>> 24);
             if (c_ctrl[1])                     // POS_PIN (with POS_BG: POS + background)
                 s_phasor[cs] <= pos_bg;
+            pvph <= c_ctrl[1] ? pos_bg : s_phasor[cs];   // playhead of this sample's onsets
             ma    <= $signed({18'd0, r_wininc[cs]});
             mb    <= $signed({2'b00, r_overlap[cs][31:16]});
             state <= ST_TI0;
@@ -897,13 +1012,175 @@ module sampler_engine #(
             state <= ST_MULW;
         end
         ST_OUT2: begin : out2
+            gq    <= sat24(mp >>> 15);
+            state <= ST_PV0;
+        end
+
+        // ============================================================== phase vocoder / mix
+        ST_PV0: begin : pv0
+            reg en, act, rs;
+            reg [1:0] alg;
+            en  = c_ctrl[0] && c_frames >= 24'd128;
+            alg = en ? r_algosel[cs][1:0] : 2'd0;
+            act = pv_act[cs];
+            rs  = 1'b0;
+            x_clr <= 1'b0;
+            if (!en && act) begin              // hard stop, like the grain path
+                act = 1'b0;
+                pv_x[cs] <= 17'd0;
+                x_clr <= 1'b1;
+            end
+            if (alg != pv_alg[cs]) begin
+                pv_alg[cs] <= alg;
+                pv_xfs[cs] <= samples + 32'd128;
+                if (alg == 2'd1 && !act) begin
+                    act = 1'b1;
+                    rs  = 1'b1;
+                end
+            end
+            if (act && pvrst)
+                rs = 1'b1;
+            pv_act[cs] <= act;
+            x_en  <= en;
+            x_act <= act;
+            x_alg <= alg;
+            x_ji  <= 2'd0;
+            if (rs) begin
+                x_nj <= 2'd3;
+                pv_nc[cs] <= samples + 32'd128 + 32'd1536;
+            end else if (act && $signed(samples - (pv_nc[cs] - 32'd1024 - 32'd512)) >= 0) begin
+                x_nj <= 2'd1;
+                pv_nc[cs] <= pv_nc[cs] + 32'd512;
+            end else
+                x_nj <= 2'd0;
+            // job fields common to all jobs of this sample
+            pj_slot   <= cs;
+            pj_notr   <= r_algosel[cs][2];
+            pj_ph     <= pvph;
+            pj_inc    <= (c_ctrl[1] && !c_ctrl[3]) ? 32'sd0 : $signed(r_phinc[cs]);
+            pj_rate   <= pvrate(r_pitch[cs]);
+            pj_base   <= r_base[cs];
+            pj_frames <= r_frames[cs];
+            pj_rs     <= rs;
+            pj_c0     <= samples + 32'd128;
+            pj_stc    <= pv_nc[cs];
+            state <= ST_PVJ;
+        end
+        ST_PVJ: begin
+            // clear job first (deactivation), then up to three grain jobs
+            pj_valid <= 1'b0;
+            if (pj_valid && !pj_ready)
+                pv_drops <= pv_drops + 1'b1;
+            if (x_clr) begin
+                pj_valid <= 1'b1;
+                pj_clear <= 1'b1;
+                x_clr <= 1'b0;
+            end else if (x_ji != x_nj) begin
+                pj_valid <= 1'b1;
+                pj_clear <= 1'b0;
+                if (pj_rs) begin
+                    pj_win   <= 2'd1 + x_ji;
+                    pj_reset <= x_ji == 2'd0;
+                    pj_c     <= pj_c0 + {21'd0, x_ji, 9'd0};
+                    pj_dl    <= (x_ji == 2'd0) ? pj_c0 : pj_c0 + 32'd256;
+                    pj_ahead <= {5'd0, x_ji, 9'd0};
+                end else begin
+                    pj_win   <= 2'd0;
+                    pj_reset <= 1'b0;
+                    pj_c     <= pj_stc;
+                    pj_dl    <= pj_stc - 32'd1024;
+                    pj_ahead <= pj_stc - 32'd128 - samples;
+                end
+                x_ji <= x_ji + 1'b1;
+            end else begin
+                em_req <= x_act;
+                dl_ra  <= {cs, samples[6:0]};
+                x_wait <= 1'b1;            // delay-line read latency
+                state  <= ST_PVE;
+            end
+        end
+        ST_PVE: begin
+            // ring entry of this sample (PV output), delay line read
+            x_wait <= 1'b0;
+            if (!x_wait && (!x_act || em_ack)) begin
+                em_req <= 1'b0;
+                x_pvs  <= !x_act ? 24'sd0
+                        : (em_q > 28'sd8388607 ? 24'sd8388607 : (em_q < -28'sd8388608 ? -24'sd8388608 : em_q[23:0]));
+                x_gd   <= dl_q[40:17];
+                x_lvd  <= dl_q[16:0];
+                dl_we  <= 1'b1;
+                dl_wa  <= {cs, samples[6:0]};
+                dl_wd  <= {gq, x_en ? s_level[cs] : 17'd0};
+                // crossfade position (from SMP_LATENCY after the switch)
+                if ($signed(samples - pv_xfs[cs]) >= 0) begin
+                    if (x_alg == 2'd1)
+                        x_xn <= (pv_x[cs] + 17'd256 > 17'd65536) ? 17'd65536 : pv_x[cs] + 17'd256;
+                    else
+                        x_xn <= (pv_x[cs] > 17'd256) ? pv_x[cs] - 17'd256 : 17'd0;
+                end else
+                    x_xn <= pv_x[cs];
+                state <= ST_PVM0;
+            end
+        end
+        ST_PVM0: begin
+            dl_we <= 1'b0;
+            pv_x[cs] <= x_xn;
+            if (x_act && x_alg != 2'd1 && x_xn == 17'd0) begin   // faded out: stop the PV
+                pv_act[cs] <= 1'b0;
+                x_clr <= 1'b1;
+            end
+            ma    <= {{26{x_pvs[23]}}, x_pvs};
+            mb    <= $signed({2'b00, r_amp[cs]});
+            mret  <= ST_PVM1;
+            state <= ST_MULW;
+        end
+        ST_PVM1: begin
+            ma    <= $signed(mp >>> 12);
+            mb    <= $signed({1'b0, x_lvd});
+            mret  <= ST_PVM2;
+            state <= ST_MULW;
+        end
+        ST_PVM2: begin
+            ma    <= $signed(mp >>> 16);
+            mb    <= $signed({2'b00, r_algo[cs]});
+            mret  <= ST_PVM3;
+            state <= ST_MULW;
+        end
+        ST_PVM3: begin : pvm3
+            reg signed [23:0] op;
+            op = sat24(mp >>> 15);
+            x_op  <= op;
+            ma    <= {{26{x_gd[23]}}, x_gd};
+            mb    <= $signed({1'b0, 17'd65536 - x_xn});
+            mret  <= ST_PVM4;
+            state <= ST_MULW;
+            x_ji  <= 2'd0;
+        end
+        ST_PVM4: begin : pvm4
             reg signed [23:0] so;
-            so = sat24(mp >>> 15);
-            s_out[cs] <= so;
-            mix   <= mix + so;
-            state <= ST_NEXT;
+            if (x_ji == 2'd0) begin
+                x_p1  <= mp;
+                ma    <= {{26{x_op[23]}}, x_op};
+                mb    <= $signed({1'b0, x_xn});
+                mret  <= ST_PVM4;
+                x_ji  <= 2'd1;
+                state <= ST_MULW;
+            end else begin
+                so = sat24((x_p1 + mp) >>> 16);
+                s_out[cs] <= so;
+                mix   <= mix + so;
+                // deactivation clear job (faded out)
+                pj_valid <= x_clr;
+                pj_clear <= 1'b1;
+                pj_slot  <= cs;
+                x_clr    <= 1'b0;
+                state <= ST_NEXT;
+            end
         end
         ST_NEXT: begin
+            pj_valid <= 1'b0;
+            if (pj_valid && !pj_ready)
+                pv_drops <= pv_drops + 1'b1;
             if (cs == N_SLOTS - 1) begin
                 ma    <= {{23{mix[26]}}, mix};
                 mb    <= $signed({2'b00, g_master});
@@ -937,14 +1214,14 @@ module sampler_engine #(
 
         // ---------------------------------------------------------- fill engine
         cm_we <= 1'b0;
-        if (fill_valid) begin
+        if (fill_g) begin
             cm_we <= 1'b1;
             cm_wa <= {pf_head[GW+2:3], pf_head[2], f_cnt};
             cm_wd <= fill_data;
             f_cnt <= f_cnt + 1'b1;
         end
         // seq/valid bookkeeping: request (clears) has priority over completion (sets)
-        if (fill_valid && f_cnt == 6'd63 && seqr[pf_head[GW+2:2]] == pf_head[1:0])
+        if (fill_g && f_cnt == 6'd63 && seqr[pf_head[GW+2:2]] == pf_head[1:0])
             vld[pf_head[GW+2:2]] <= 1'b1;
         if (req_fire) begin
             seqr[{e_gid, req_way}] <= seqr[{e_gid, req_way}] + 1'b1;
@@ -957,9 +1234,9 @@ module sampler_engine #(
             vld[{cs, vfree[4:0], 1'b0}] <= 1'b0;
             vld[{cs, vfree[4:0], 1'b1}] <= 1'b0;
         end
-        if (fill_valid && f_cnt == 6'd63)
+        if (fill_g && f_cnt == 6'd63)
             pf_rp <= pf_rp + 1'b1;
-        pf_cnt <= pf_cnt + (req_fire ? 7'd1 : 7'd0) - ((fill_valid && f_cnt == 6'd63) ? 7'd1 : 7'd0);
+        pf_cnt <= pf_cnt + (req_fire ? 7'd1 : 7'd0) - ((fill_g && f_cnt == 6'd63) ? 7'd1 : 7'd0);
 
         if (rst) begin
             state     <= ST_IDLE;
@@ -971,6 +1248,10 @@ module sampler_engine #(
             samples   <= 0;
             beat      <= 0;
             req_drops <= 0;
+            pv_drops  <= 0;
+            pj_valid  <= 1'b0;
+            em_req    <= 1'b0;
+            dl_we     <= 1'b0;
             mcnt      <= 0;
             stat_addr <= 0;
             g_master  <= 16'd4096;
@@ -1004,6 +1285,12 @@ module sampler_engine #(
                 r_interval[i] <= 14'd4800;
                 r_amp[i]      <= 16'd4096;
                 r_algo[i]     <= 16'd32768;
+                r_algosel[i]  <= 3'd0;
+                pv_act[i]     <= 1'b0;
+                pv_alg[i]     <= 2'd0;
+                pv_xfs[i]     <= 32'd0;
+                pv_x[i]       <= 17'd0;
+                pv_nc[i]      <= 32'd0;
                 pend_stb[i]   <= 5'd0;
                 s_phasor[i]   <= 56'd0;
                 s_trigph[i]   <= 32'd0;

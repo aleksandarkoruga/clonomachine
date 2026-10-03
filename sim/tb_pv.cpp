@@ -222,15 +222,16 @@ int main(int argc, char** argv) {
         while (now < e) {
             for (int s = 0; s < 2; ++s) {
                 sl[s].ring[now & (smp::PV_RING - 1)] = 0;
-                top->em_re = 1;
-                top->em_clr = 1;
+                top->em_req = 1;
                 top->em_slot = s;
                 top->em_addr = now & 4095;
                 top->now = now;
+                do
+                    tick();
+                while (!top->em_ack);
+                top->em_req = 0;
                 tick();
             }
-            top->em_re = 0;
-            top->em_clr = 0;
             ++now;
         }
         top->now = now;
@@ -239,12 +240,17 @@ int main(int argc, char** argv) {
     auto compareRings = [&](const char* what) {
         for (int s = 0; s < 2; ++s)
             for (uint32_t a = 0; a < 4096; ++a) {
-                top->em_re = 1;
-                top->em_clr = 0;
+                // entries played but not yet cleared (lazy clearing) hold stale data
+                const uint32_t clp = top->rootp->pv_unit__DOT__clp[s];
+                if (int32_t(now - clp) > 0 && ((a - clp) & 4095) < ((now - clp) < 4096 ? now - clp : 4096))
+                    continue;
+                top->em_req = 1;
                 top->em_slot = s;
                 top->em_addr = a;
-                tick();
-                top->em_re = 0;
+                do
+                    tick();
+                while (!top->em_ack);
+                top->em_req = 0;
                 tick();
                 const int32_t r = (int32_t(top->em_q) << 4) >> 4;
                 if (r != sl[s].ring[a]) {

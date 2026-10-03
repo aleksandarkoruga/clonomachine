@@ -157,7 +157,9 @@ static int runScenario(const Scenario& sc, const char* romDir) {
                 mism ? (std::to_string(10 * std::log10(sigE / std::max(errE, 1e-9))) + " dB").c_str() : "exact",
                 st[SMP_SG_CYCLES_MAX], miss, st[SMP_SG_REQ_DROPS], st[SMP_SG_MAGIC]);
     delete top;
-    bool ok = sc.expectExact ? (mism == 0 && miss == 0 && st[SMP_SG_CYCLES_MAX] < 1024) : true;
+    if (st[SMP_SG_PV_MISSES])
+        std::printf("  [%s] phase-vocoder deadline misses / job drops: %u\n", sc.name, st[SMP_SG_PV_MISSES]);
+    bool ok = sc.expectExact ? (mism == 0 && miss == 0 && st[SMP_SG_CYCLES_MAX] < 1024 && st[SMP_SG_PV_MISSES] == 0) : true;
     if (st[SMP_SG_MAGIC] != SMP_MAGIC) ok = false;
     return ok ? 0 : 1;
 }
@@ -308,6 +310,63 @@ int main(int argc, char** argv) {
         }
         if (n == 31000)
             w.push_back({SMP_ADDR(0, SMP_R_CTRL), SMP_CTRL_ENABLE});  // toggle off again
+    }});
+
+    // ---- phase vocoder
+    scs.push_back({"pv_basic", 30000, 40, true, [](int n, std::vector<Write>& w) {
+        if (n == 0) {
+            slotSetup(w, 0, gBufA, 0.04, 4, 0.5, 1.0);
+            w.push_back({SMP_ADDR(0, SMP_R_ALGO), SMP_ALGO_PV});
+        }
+        if (n == 0 || n == 15000) {
+            w.push_back({SMP_ADDR(0, SMP_R_POS), n ? (gBufA.frames / 3) << 8 : 0});
+            w.push_back({SMP_ADDR(0, SMP_R_STROBE), SMP_STROBE_TRIG});
+        }
+    }});
+
+    scs.push_back({"pv_switch_stutter", 40000, 40, true, [](int n, std::vector<Write>& w) {
+        if (n == 0) {
+            slotSetup(w, 0, gBufA, 0.04, 4, 0.7, 1.0);
+            slotSetup(w, 1, gBufB, 0.05, 3, -1.0, 1.3);
+            w.push_back({SMP_ADDR(1, SMP_R_ALGO), SMP_ALGO_PV | SMP_ALGO_NO_TRANSIENT});
+            w.push_back({SMP_ADDR(0, SMP_R_STROBE), SMP_STROBE_TRIG});
+            w.push_back({SMP_ADDR(1, SMP_R_STROBE), SMP_STROBE_TRIG});
+        }
+        if (n == 5000 || n == 20000) w.push_back({SMP_ADDR(0, SMP_R_ALGO), SMP_ALGO_PV});
+        if (n == 15000 || n == 32000) w.push_back({SMP_ADDR(0, SMP_R_ALGO), SMP_ALGO_GRAIN});
+        if (n == 8000) {
+            w.push_back({SMP_ADDR(1, SMP_R_POS), (gBufB.frames / 4) << 8});
+            w.push_back({SMP_ADDR(1, SMP_R_REPEATS), 3});
+            w.push_back({SMP_ADDR(1, SMP_R_INTERVAL), 2400});
+            w.push_back({SMP_ADDR(1, SMP_R_STROBE), SMP_STROBE_TRIG});
+        }
+        if (n == 26000) w.push_back({SMP_ADDR(1, SMP_R_PITCH), q24(0.7)});
+    }});
+
+    scs.push_back({"pv_pin_seek_kill", 36000, 40, true, [](int n, std::vector<Write>& w) {
+        if (n == 0) {
+            slotSetup(w, 0, gBufA, 0.04, 4, 1.0, 1.0);
+            w.push_back({SMP_ADDR(0, SMP_R_ALGO), SMP_ALGO_PV});
+            w.push_back({SMP_ADDR(0, SMP_R_POS), 9000u << 8});
+            w.push_back({SMP_ADDR(0, SMP_R_CTRL), SMP_CTRL_ENABLE | SMP_CTRL_POS_PIN | SMP_CTRL_ENV_HOLD});
+            w.push_back({SMP_ADDR(0, SMP_R_STROBE), SMP_STROBE_TRIG});
+        }
+        if (n == 6000) w.push_back({SMP_ADDR(0, SMP_R_POS), 9300u << 8});        // scrub while pinned
+        if (n == 10000) w.push_back({SMP_ADDR(0, SMP_R_CTRL), SMP_CTRL_ENABLE | SMP_CTRL_ENV_HOLD});
+        if (n == 14000) {
+            w.push_back({SMP_ADDR(0, SMP_R_POS), 30000u << 8});
+            w.push_back({SMP_ADDR(0, SMP_R_STROBE), SMP_STROBE_SEEK});
+        }
+        if (n == 18000) {
+            w.push_back({SMP_ADDR(0, SMP_R_BASE), gBufB.base});
+            w.push_back({SMP_ADDR(0, SMP_R_FRAMES), gBufB.frames});
+            w.push_back({SMP_ADDR(0, SMP_R_STROBE), SMP_STROBE_KILL});
+        }
+        if (n == 23000) w.push_back({SMP_ADDR(0, SMP_R_CTRL), 0});                  // disable
+        if (n == 25000) {                                                            // enable again
+            w.push_back({SMP_ADDR(0, SMP_R_CTRL), SMP_CTRL_ENABLE | SMP_CTRL_ENV_HOLD});
+            w.push_back({SMP_ADDR(0, SMP_R_STROBE), SMP_STROBE_TRIG});
+        }
     }});
 
     scs.push_back({"stress_64_grains", 12000, 40, true, [](int n, std::vector<Write>& w) {

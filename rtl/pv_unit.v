@@ -39,16 +39,18 @@ module pv_unit #(
     input  wire [55:0]       job_ph,      // playhead Q32
     input  wire signed [15:0] job_ahead,  // pos = ph + ahead * inc
     input  wire signed [31:0] job_inc,    // playhead increment s8.24
-    input  wire [25:0]       job_rate,    // read rate u8.24
+    input  wire [26:0]       job_rate,    // read rate u8.24, (0, 4]
     input  wire [23:0]       job_base,
     input  wire [23:0]       job_frames,
 
-    // ring access (engine): read entry, optionally clear it
-    input  wire              em_re,
-    input  wire              em_clr,
+    // ring read (engine): hold em_req until em_ack; em_q is valid with em_ack. Played
+    // entries are cleared here (lazily, before the ring is written again).
+    input  wire              em_req,
     input  wire [SB-1:0]     em_slot,
     input  wire [11:0]       em_addr,
-    output reg  signed [27:0] em_q,
+    output reg               em_ack,
+    output wire signed [27:0] em_q,
+    output wire [NS-1:0]     clr_busy,    // slot has a ring clear job queued / running
 
     // SDRAM lines
     output wire              req_valid,
@@ -204,19 +206,20 @@ module pv_unit #(
         if (hi_we) hist[hi_wa] <= hi_wd;
         hi_q <= hist[hi_ra];
     end
-    // overlap-add rings: port A here, port B engine
+    // overlap-add rings (simple dual port). The read port serves the engine whenever this
+    // unit does not read (rg_rv low): every pass reads at most every other cycle.
     reg  signed [27:0] ring [0:NS*4096-1];
-    reg  [SB+11:0] rg_a;
-    reg         rg_we;
+    reg  [SB+11:0] rg_a, rg_wa;
+    reg         rg_rv, rg_we;
     reg  signed [27:0] rg_wd, rg_q;
+    wire [SB+11:0] rg_ra = rg_rv ? rg_a : {em_slot, em_addr};
     always @(posedge clk) begin
-        if (rg_we) ring[rg_a] <= rg_wd;
-        rg_q <= ring[rg_a];
+        if (rg_we) ring[rg_wa] <= rg_wd;
+        rg_q <= ring[rg_ra];
     end
-    always @(posedge clk) begin
-        if (em_clr) ring[{em_slot, em_addr}] <= 28'sd0;
-        if (em_re) em_q <= ring[{em_slot, em_addr}];
-    end
+    assign em_q = rg_q;
+    always @(posedge clk)
+        em_ack <= !rst && em_req && !rg_rv && !em_ack;
     // input line buffer (4 lines), two copies for two read ports
     reg  [15:0] lb0 [0:255];
     reg  [15:0] lb1 [0:255];
@@ -233,12 +236,12 @@ module pv_unit #(
     end
 
     // ================================================================== job queues
-    localparam JW = 1 + 2 + 1 + 1 + 32 + 32 + 56 + 16 + 32 + 26 + 24 + 24;
-    localparam QD = 4;
+    localparam JW = 1 + 2 + 1 + 1 + 32 + 32 + 56 + 16 + 32 + 27 + 24 + 24;
+    localparam QD = 8;
     reg  [JW-1:0] jq [0:NS*QD-1];
-    reg  [1:0]  jq_wp [0:NS-1];
-    reg  [1:0]  jq_rp [0:NS-1];
-    reg  [2:0]  jq_n  [0:NS-1];
+    reg  [2:0]  jq_wp [0:NS-1];
+    reg  [2:0]  jq_rp [0:NS-1];
+    reg  [3:0]  jq_n  [0:NS-1];
     assign job_ready = jq_n[job_slot] < QD;
     wire [JW-1:0] job_word = {job_clear, job_win, job_reset, job_notr, job_c, job_dl, job_ph,
                               job_ahead, job_inc, job_rate, job_base, job_frames};
@@ -267,10 +270,19 @@ module pv_unit #(
     reg  [55:0] jph;
     reg  signed [15:0] jahead;
     reg  signed [31:0] jinc;
-    reg  [25:0] jrate;
+    reg  [26:0] jrate;
     reg  [23:0] jbase, jframes;
     wire [55:0] F = {jframes, 32'd0};
     wire signed [47:0] ahinc = jahead * jinc;
+
+    // lazy ring clearing
+    reg  [31:0] clp   [0:NS-1];         // entries for samples < clp are cleared
+    reg  [SB-1:0] clr_rr;
+    reg  [2:0]  clr_n [0:NS-1];         // clear jobs queued or running
+    genvar gs;
+    generate for (gs = 0; gs < NS; gs = gs + 1) begin : clrb
+        assign clr_busy[gs] = clr_n[gs] != 0;
+    end endgenerate
 
     // per-slot history registers
     reg         h_valid [0:NS-1];
@@ -426,7 +438,7 @@ module pv_unit #(
         P_S3   = 5'd5,  P_S4   = 5'd6,  P_S5 = 5'd7,   P_S6 = 5'd8,   P_FRAME = 5'd9,
         P_FFT  = 5'd10, P_A0   = 5'd11, P_A1 = 5'd12,  P_B1 = 5'd13,  P_B2 = 5'd14,
         P_C1   = 5'd15, P_C2   = 5'd16, P_IFFT = 5'd17, P_FADE = 5'd18, P_CLR = 5'd19,
-        P_OLA  = 5'd20, P_CLEAR = 5'd21, P_DONE = 5'd22;
+        P_OLA  = 5'd20, P_CLEAR = 5'd21, P_DONE = 5'd22, P_CATCH = 5'd23;
     reg  [4:0]  ph;
     reg  [3:0]  sub;
     assign busy = ph != P_IDLE;
@@ -441,7 +453,7 @@ module pv_unit #(
     reg  [15:0] fillSeq;
     reg  [5:0]  fillW;
     reg  [15:0] cOld;                    // consumer's oldest needed sequence number
-    wire [55:0] step_q = {22'd0, jrate, 8'd0};
+    wire [55:0] step_q = {21'd0, jrate, 8'd0};
     wire [24:0] f_w0 = {1'b0, jbase} + 25'd64 + {1'b0, fP[55:32]};
     wire [24:0] f_w1 = f_w0 + 25'd1;
     wire [18:0] f_line = fHalf ? f_w1[24:6] : f_w0[24:6];
@@ -599,7 +611,7 @@ module pv_unit #(
 
     always @(posedge clk) begin
         bk_we[0] <= 0; bk_we[1] <= 0; bk_we[2] <= 0; bk_we[3] <= 0; cu_we <= 0; pk_we <= 0; en_we <= 0; dm_we <= 0;
-        hi_we <= 0; rg_we <= 0; lb_we <= 0; dv_go <= 0; co_in_v <= 0;
+        hi_we <= 0; rg_we <= 0; rg_rv <= 0; lb_we <= 0; dv_go <= 0; co_in_v <= 0;
         if (rst) begin
             ph <= P_IDLE;
             misses <= 0;
@@ -609,6 +621,8 @@ module pv_unit #(
                 jq_wp[ii] <= 0;
                 jq_rp[ii] <= 0;
                 jq_n[ii]  <= 0;
+                clp[ii]   <= 0;
+                clr_n[ii] <= 0;
                 h_valid[ii] <= 0;
                 h_pos[ii] <= 0;
                 h_err[ii] <= 0;
@@ -622,11 +636,13 @@ module pv_unit #(
             if (job_valid && job_ready) begin
                 jq[job_slot*QD + jq_wp[job_slot]] <= job_word;
                 jq_wp[job_slot] <= jq_wp[job_slot] + 1'b1;
+                if (job_clear)
+                    clr_n[job_slot] <= clr_n[job_slot] + 1'b1;
             end
             // queue counts (push and pop may coincide)
             for (ii = 0; ii < NS; ii = ii + 1)
-                jq_n[ii] <= jq_n[ii] + ((job_valid && job_ready && job_slot == ii) ? 3'd1 : 3'd0)
-                                     - ((ph == P_IDLE && pick_ok && pick == ii) ? 3'd1 : 3'd0);
+                jq_n[ii] <= jq_n[ii] + ((job_valid && job_ready && job_slot == ii) ? 4'd1 : 4'd0)
+                                     - ((ph == P_IDLE && pick_ok && pick == ii) ? 4'd1 : 4'd0);
 
             // ---- fills (PV lines)
             if (fill_valid) begin
@@ -645,7 +661,31 @@ module pv_unit #(
                     <= jq[pick*QD + jq_rp[pick]];
                 js <= pick;
                 jq_rp[pick] <= jq_rp[pick] + 1'b1;
-                ph <= P_TAKE;
+                ph <= P_CATCH;
+                t13 <= 0;
+            end else begin
+                // clear played ring entries in the background, one slot per cycle
+                if ($signed(now - clp[clr_rr]) > 0) begin
+                    rg_we <= 1;
+                    rg_wa <= {clr_rr, clp[clr_rr][11:0]};
+                    rg_wd <= 0;
+                    clp[clr_rr] <= clp[clr_rr] + 1'b1;
+                end
+                clr_rr <= (clr_rr == NS - 1) ? {SB{1'b0}} : clr_rr + 1'b1;
+            end
+            P_CATCH: begin
+                // all played entries of this slot are cleared before its ring is written
+                if ($signed(now - clp[js]) > 0 && t13 != 13'd4096) begin
+                    rg_we <= 1;
+                    rg_wa <= {js, clp[js][11:0]};
+                    rg_wd <= 0;
+                    clp[js] <= clp[js] + 1'b1;
+                    t13 <= t13 + 1'b1;
+                end else begin
+                    if ($signed(now - clp[js]) > 0)
+                        clp[js] <= now;      // more than a whole ring behind: all cleared
+                    ph <= P_TAKE;
+                end
             end
             P_TAKE: begin
                 if (jclear) begin
@@ -701,7 +741,7 @@ module pv_unit #(
                 end
                 3: begin
                     dv_n <= {(s_d16 < 0 ? -s_d16 : s_d16), 24'd0};
-                    dv_d <= {38'd0, jrate};
+                    dv_d <= {37'd0, jrate};
                     dv_go <= 1;
                     sub <= 4;
                 end
@@ -759,7 +799,7 @@ module pv_unit #(
                     tmul <= (hop == 0) ? 26'sd0 : (hop < 0 ? -$signed({1'b0, dv_q[24:0]}) : $signed({1'b0, dv_q[24:0]}));
                     // frame start P0 = (pos + (err*rate >> 8) - (2048*rate << 8)) mod F
                     s_sum <= $signed({2'b00, pos}) + (($signed(err) * $signed({1'b0, jrate})) >>> 8)
-                           - $signed({13'd0, jrate, 19'd0});
+                           - $signed({12'd0, jrate, 19'd0});
                     sub <= 7;
                 end
                 7: begin
@@ -1425,12 +1465,14 @@ module pv_unit #(
             P_FADE: case (pc)
                 0: begin
                     rg_a <= {js, jc[11:0] + t13[11:0]};
+                    rg_rv <= 1;
                     wr_a <= 12'd2561 + t13[11:0];
                     pc <= 1;
                 end
                 1: pc <= 2;
                 2: begin
                     rg_we <= 1;
+                    rg_wa <= {js, jc[11:0] + t13[11:0]};
                     rg_wd <= ($signed(rg_q) * $signed({1'b0, wr_d}) + 46'sd32768) >>> 16;
                     if (t13 == FADE - 1) begin
                         ph <= P_CLR;
@@ -1443,7 +1485,7 @@ module pv_unit #(
             P_CLR: begin
                 // clear [c0+FADE, e+CLEAR_END), c0 = e + LT
                 rg_we <= 1;
-                rg_a <= {js, jc[11:0] + t13[11:0]};
+                rg_wa <= {js, jc[11:0] + t13[11:0]};
                 rg_wd <= 0;
                 if (t13 == CLEAR_END - LT - 1) begin
                     ph <= P_OLA;
@@ -1482,7 +1524,7 @@ module pv_unit #(
                         endcase
                         wr_a <= wa;
                         rg_a <= {js, jc[11:0] + t[11:0]};
-                        rg_we <= 0;
+                        rg_rv <= 1;
                         j = t[11:0];
                         la = rev11(j[11:1]);
                         if (!t13[0]) begin
@@ -1511,7 +1553,7 @@ module pv_unit #(
                     o_lap <= o_la;
                 end else begin
                     if (ov[2]) begin
-                        rg_a <= {js, o_addr[2]};
+                        rg_wa <= {js, o_addr[2]};
                         rg_we <= o_wen;
                         rg_wd <= o_rq + ((o_prod + 45'sd131072) >>> 18);
                     end
@@ -1522,11 +1564,14 @@ module pv_unit #(
             // ============================================================ clear job
             P_CLEAR: begin
                 rg_we <= 1;
-                rg_a <= {js, t13[11:0]};
+                rg_wa <= {js, t13[11:0]};
                 rg_wd <= 0;
                 t13 <= t13 + 1'b1;
-                if (t13 == 13'd4095)
+                if (t13 == 13'd4095) begin
                     ph <= P_DONE;
+                    clp[js] <= now;
+                    clr_n[js] <= clr_n[js] - 1'b1;
+                end
             end
             P_DONE: ph <= P_IDLE;
             default: ph <= P_IDLE;
