@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "../include/sampler_regs.h"
+#include "pv_model.h"
 
 namespace smp {
 
@@ -52,17 +53,35 @@ struct Slot {
     uint32_t stutLeft = 0, stutPh = 0;
 
     uint32_t gateState = 0;
-    int32_t lastOut = 0;
+    int32_t lastOut = 0;  // slot output after the latency delay and the algorithm mix
+    int32_t gOut = 0;     // grain path output of this sample (before the delay)
+
+    // for the phase vocoder (set by step)
+    int64_t pvPh = 0;     // playhead used by this sample's onsets (after trig/seek/pin)
+    bool pvRestart = false; // trig / retrig / SEEK / KILL this sample
 
     void reset(int idx);
     int32_t step(const std::vector<int16_t>& mem, const Tables& t);
     uint32_t xorshift();
 };
 
+// Phase-vocoder path of one slot (see SMP_LATENCY / SMP_R_ALGO).
+struct PvSlot {
+    bool active = false;
+    uint32_t algo = 0;      // last ALGO value seen
+    uint32_t xfStart = 0;   // crossfade starts at this sample
+    uint32_t x = 0;         // crossfade position u0.16 (0 grain, 65536 PV)
+    uint32_t nextC = 0;     // centre (output sample) of the next steady grain
+    PvSlotState st;
+    std::vector<int32_t> ring = std::vector<int32_t>(PV_RING, 0);
+    std::vector<int32_t> dlOut = std::vector<int32_t>(SMP_LATENCY, 0);
+    std::vector<uint32_t> dlLevel = std::vector<uint32_t>(SMP_LATENCY, 0);
+};
+
 class Engine {
 public:
     explicit Engine(int nSlots);
-    bool loadTables(const std::string& dir) { return tab.load(dir); }
+    bool loadTables(const std::string& dir) { return tab.load(dir) && pv.loadTables(dir); }
 
     void write(uint32_t addr, uint32_t data);
     uint32_t status(uint32_t idx) const;
@@ -76,9 +95,14 @@ public:
     uint64_t beat = 0;
     uint32_t beatInc = 0;
     uint32_t samples = 0;
+    std::vector<PvSlot> pvs;
+    PvCore pv;
+    uint64_t pvJobs = 0;
 
 private:
     Tables tab;
+    int32_t mixSlot(int s);
+    void pvIssue(int s, uint32_t c, int64_t pos, int64_t inc, bool reset, int win);
 };
 
 } // namespace smp

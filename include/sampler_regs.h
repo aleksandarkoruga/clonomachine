@@ -45,7 +45,7 @@ enum {
     SMP_R_ENV_DUR     = 16, /* u24  gate length in samples                                      */
     SMP_R_REPEATS     = 17, /* u7   stutter: retrigger the TRIG position this many times        */
     SMP_R_INTERVAL    = 18, /* u14  stutter period in samples (live)                            */
-    SMP_R_RESERVED19  = 19, /* was STUT_RATE (stutter buffer removed)                           */
+    SMP_R_ALGO        = 19, /* bits1:0 algorithm (0 grain, 1 phase vocoder), bit2 PV no transient */
     SMP_R_AMP         = 20, /* u4.12                                                            */
     SMP_R_ALGO_AMP    = 21, /* u1.15                                                            */
     SMP_NUM_SLOT_REGS = 22
@@ -60,9 +60,21 @@ enum {
 #define SMP_STROBE_KILL     (1u << 2)
 #define SMP_STROBE_SEEK     (1u << 3)   /* playhead = POS, no onset / gate / stutter       */
 #define SMP_STROBE_BG_RESET (1u << 4)   /* background phasor = 0 (transport start)         */
+#define SMP_ALGO_GRAIN      0u          /* BufGrainPlay time-domain grains                  */
+#define SMP_ALGO_PV         1u          /* phase vocoder (Bungee Basic), model/pv_model.h   */
+#define SMP_ALGO_MASK       3u
+#define SMP_ALGO_NO_TRANSIENT (1u << 2) /* PV: no transient partial suppression             */
 /* Every slot runs a background phasor that always advances by PHASOR_INC (the sample
    "keeps playing" while the gate is closed). With CTRL.POS_BG, TRIG / stutter latch and
    POS_PIN use (POS + background) mod FRAMES instead of POS. */
+/* Output latency: every slot output (grain and phase vocoder path) is delayed by
+   SMP_LATENCY samples, the time the phase vocoder needs to start a grain at a new
+   position. A change of ALGO crossfades the two paths over SMP_ALGO_XF samples.
+   Phase vocoder restarts (old content fades out, new grains from the playhead) on
+   TRIG, stutter retrigger, SEEK, KILL and when the slot switches to it. */
+#define SMP_LATENCY        128
+#define SMP_ALGO_XF        256
+#define SMP_PV_LOOKAHEAD   512   /* steady grains are issued this much before they are due */
 /* BASE/FRAMES may change while grains play: every grain keeps reading the buffer it
    was started in, so a buffer switch crossfades through the overlap. A playhead past
    the new FRAMES restarts at 0 (firmware normally SEEKs to the equivalent beat). */
@@ -82,6 +94,7 @@ enum {
     SMP_S_GATE        = 2,  /* 0 closed, 1 ramp-up, 2 open, 3 ramp-down, 4 stutter              */
     SMP_S_CACHE_MISS  = 3,  /* saturating miss counter (grain-samples muted)                    */
     SMP_S_OUT         = 4,  /* last slot output sample, s24 (Q8 sample units)                   */
+    SMP_S_PV          = 5,  /* bit0 PV active, bits 31:16 crossfade position (u0.16)            */
 };
 enum {
     SMP_SG_CYCLES_MAX = 56, /* engine cycle high-water mark per sample (budget 1024)            */
@@ -90,6 +103,7 @@ enum {
     SMP_SG_BEAT_LO    = 59, /* beat phase fraction u0.32                                        */
     SMP_SG_SAMPLES    = 60, /* sample counter                                                   */
     SMP_SG_REQ_DROPS  = 61, /* line requests deferred because the request FIFO was full         */
+    SMP_SG_PV_MISSES  = 62, /* phase-vocoder grains that missed their deadline (RTL only)       */
     SMP_SG_MAGIC      = 63  /* 0x534D504C 'SMPL'                                                */
 };
 #define SMP_MAGIC 0x534D504Cu

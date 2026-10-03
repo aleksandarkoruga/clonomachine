@@ -1,6 +1,7 @@
 // Bit-exact golden model, see sampler_model.h. Compile with -std=c++20 (arithmetic >>).
 #include "sampler_model.h"
 
+#include <algorithm>
 #include <bit>
 #include <cstdio>
 #include <fstream>
@@ -64,8 +65,9 @@ int32_t Slot::step(const std::vector<int16_t>& mem, const Tables& t) {
     strobe = 0;
     const int64_t F = static_cast<int64_t>(r[SMP_R_FRAMES] & 0xFFFFFF) << 32;
     if (!(ctrl & SMP_CTRL_ENABLE) || r[SMP_R_FRAMES] < 128) {
-        lastOut = 0;
+        gOut = 0;
         gateState = 0;
+        pvRestart = false;
         return 0;
     }
     const bool gtrig = stb & SMP_STROBE_TRIG; // note-on: gate + stutter restart
@@ -150,6 +152,8 @@ int32_t Slot::step(const std::vector<int16_t>& mem, const Tables& t) {
     // 4. position pin
     if (ctrl & SMP_CTRL_POS_PIN)
         phasor = posBg;
+    pvPh = phasor;
+    pvRestart = trig || (stb & (SMP_STROBE_SEEK | SMP_STROBE_KILL));
 
     // 5. onset clock
     const uint64_t ti = ((((static_cast<uint64_t>(r[SMP_R_WIN_INC]) * r[SMP_R_OVERLAP]) >> 24) * hop) >> 16);
@@ -241,13 +245,13 @@ int32_t Slot::step(const std::vector<int16_t>& mem, const Tables& t) {
     int64_t o = (static_cast<int64_t>(z) * (r[SMP_R_AMP] & 0xFFFF)) >> 12;
     o = (o * level) >> 16;
     o = (o * (r[SMP_R_ALGO_AMP] & 0xFFFF)) >> 15;
-    lastOut = sat(o, 24);
+    gOut = sat(o, 24);
 
     gateState = stutActive ? 4 : gate ? (level < 65536 ? 1 : 2) : (level ? 3 : 0);
-    return lastOut;
+    return gOut;
 }
 
-Engine::Engine(int n): nSlots(n), slots(n) {
+Engine::Engine(int n): nSlots(n), slots(n), pvs(n) {
     for (int i = 0; i < n; ++i)
         slots[i].reset(i);
 }
@@ -289,6 +293,7 @@ uint32_t Engine::status(uint32_t idx) const {
         case SMP_S_ACTIVE: return static_cast<uint32_t>(std::popcount(sl.active));
         case SMP_S_GATE: return sl.gateState;
         case SMP_S_OUT: return static_cast<uint32_t>(sl.lastOut) & 0xFFFFFF;
+        case SMP_S_PV: return (pvs[s].active ? 1u : 0u) | (std::min<uint32_t>(pvs[s].x, 65535) << 16);
         default: return 0;
         }
     }
@@ -301,10 +306,117 @@ uint32_t Engine::status(uint32_t idx) const {
     }
 }
 
+static inline int64_t wrapPos(int64_t p, int64_t F) {
+    p %= F;
+    return p < 0 ? p + F : p;
+}
+
+void Engine::pvIssue(int s, uint32_t c, int64_t pos, int64_t inc, bool reset, int win) {
+    const Slot& sl = slots[s];
+    PvSlot& p = pvs[s];
+    PvJob j;
+    j.frames = sl.r[SMP_R_FRAMES] & 0xFFFFFF;
+    j.base = sl.r[SMP_R_BASE] & 0xFFFFFF;
+    j.pos = wrapPos(pos, static_cast<int64_t>(j.frames) << 32);
+    j.inc = inc;
+    const int32_t pitch = static_cast<int32_t>(sl.r[SMP_R_PITCH]);
+    j.rate = std::clamp<uint32_t>(static_cast<uint32_t>(pitch < 0 ? -int64_t(pitch) : pitch), 1u << 20, 1u << 26);
+    j.reset = reset;
+    j.win = win;
+    pv.transientSuppression = !(sl.r[SMP_R_ALGO] & SMP_ALGO_NO_TRANSIENT);
+    pv.run(j, p.st, mem);
+    pv.accumulate(p.ring.data(), c, win);
+    ++pvJobs;
+}
+
+// Phase-vocoder path and output mix of slot s for this sample (after Slot::step).
+int32_t Engine::mixSlot(int s) {
+    Slot& sl = slots[s];
+    PvSlot& p = pvs[s];
+    const uint32_t e = samples;
+    constexpr uint32_t mask = PV_RING - 1;
+    const uint32_t ctrl = sl.r[SMP_R_CTRL];
+    const bool enabled = (ctrl & SMP_CTRL_ENABLE) && sl.r[SMP_R_FRAMES] >= 128;
+    const uint32_t algo = enabled ? (sl.r[SMP_R_ALGO] & SMP_ALGO_MASK) : 0;
+
+    bool restart = false;
+    if (!enabled && p.active) { // hard stop, like the grain path
+        p.active = false;
+        p.st.valid = false;
+        p.x = 0;
+        std::fill(p.ring.begin(), p.ring.end(), 0);
+    }
+    if (algo != p.algo) {
+        p.algo = algo;
+        p.xfStart = e + SMP_LATENCY;
+        if (algo == SMP_ALGO_PV && !p.active) {
+            p.active = true;
+            restart = true;
+        }
+    }
+    if (p.active && sl.pvRestart)
+        restart = true;
+
+    const int64_t inc = ((ctrl & SMP_CTRL_POS_PIN) && !(ctrl & SMP_CTRL_POS_BG))
+        ? 0 : static_cast<int64_t>(static_cast<int32_t>(sl.r[SMP_R_PHASOR_INC])) << 8;
+    if (restart) {
+        // old content: fades out from c0, everything later is cleared
+        const uint32_t c0 = e + SMP_LATENCY;
+        const PvTables& t = pv.tables();
+        for (uint32_t u = 0; u < PV_FADE; ++u) {
+            int32_t& v = p.ring[(c0 + u) & mask];
+            v = static_cast<int32_t>((static_cast<int64_t>(v) * t.fadeOut[u] + 32768) >> 16);
+        }
+        for (uint32_t tt = c0 + PV_FADE; tt != e + PV_RING; ++tt)
+            p.ring[tt & mask] = 0;
+        for (int k = 0; k < 3; ++k)
+            pvIssue(s, c0 + k * PV_H, sl.pvPh + int64_t(k) * PV_H * inc, inc, k == 0, PV_WIN_R0 + k);
+        p.nextC = c0 + 3 * PV_H;
+    } else if (p.active && static_cast<int32_t>(e - (p.nextC - 2 * PV_H - SMP_PV_LOOKAHEAD)) >= 0) {
+        const int32_t ahead = static_cast<int32_t>(p.nextC - SMP_LATENCY - e);
+        pvIssue(s, p.nextC, sl.pvPh + int64_t(ahead) * inc, inc, false, PV_WIN_NORMAL);
+        p.nextC += PV_H;
+    }
+
+    int32_t pvOut = 0;
+    if (p.active) {
+        int32_t& v = p.ring[e & mask];
+        pvOut = sat(v, 24);
+        v = 0;
+    }
+    const uint32_t di = e % SMP_LATENCY;
+    const int32_t gD = p.dlOut[di];
+    const uint32_t levelD = p.dlLevel[di];
+    p.dlOut[di] = sl.gOut;
+    p.dlLevel[di] = enabled ? sl.level : 0;
+
+    if (static_cast<int32_t>(e - p.xfStart) >= 0) {
+        constexpr uint32_t step = 65536 / SMP_ALGO_XF;
+        if (algo == SMP_ALGO_PV)
+            p.x = std::min<uint32_t>(p.x + step, 65536);
+        else
+            p.x = p.x > step ? p.x - step : 0;
+    }
+    if (p.active && p.algo != SMP_ALGO_PV && p.x == 0) {
+        p.active = false;
+        p.st.valid = false;
+        std::fill(p.ring.begin(), p.ring.end(), 0);
+    }
+
+    int64_t o = (static_cast<int64_t>(pvOut) * (sl.r[SMP_R_AMP] & 0xFFFF)) >> 12;
+    o = (o * levelD) >> 16;
+    o = (o * (sl.r[SMP_R_ALGO_AMP] & 0xFFFF)) >> 15;
+    const int64_t op = sat(o, 24);
+    sl.lastOut = sat((static_cast<int64_t>(gD) * (65536 - p.x) + op * p.x) >> 16, 24);
+    return sl.lastOut;
+}
+
 int32_t Engine::step() {
     int64_t sum = 0;
-    for (auto& sl : slots)
-        sum += sl.step(mem, tab);
+    for (int s = 0; s < nSlots; ++s) {
+        slots[s].step(mem, tab);
+        sum += mixSlot(s);
+    }
     beat += beatInc;
     ++samples;
     return sat((sum * master) >> 12, 24);

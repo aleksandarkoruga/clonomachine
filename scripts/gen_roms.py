@@ -39,7 +39,9 @@ with open(os.path.join(out, "pv_atan.hex"), "w") as f:
         f.write("%06x\n" % int(round(math.atan(2.0 ** -i) / (2 * math.pi) * (1 << 24))))
 
 # pv_win.hex : synthesis weights, u0.18 (value * 2^18), gain folded in:
-#   G = 2*gain*2^PV_INV_SCALE / K^2, gain = 3pi/(3pi+8) (Bungee), K = CORDIC gain
+#   G = 2*gain*2^PV_INV_SCALE / K^2 * PV_GAIN, gain = 3pi/(3pi+8) (Bungee), K = CORDIC gain,
+#   PV_GAIN = 0.5: the grain engine's nominal gain (Hann grains normalised by 1/overlap),
+#   so that switching algorithms keeps the level
 #   [0    .. 1024]  ws(t) * G, t = 0..1024        (zero phase, symmetric)
 #   [1025 .. 1536]  W0(u) * G, u = 0..511          (reset grain R0, one sided)
 #   [1537 .. 2048]  W1(u) * G                      (R1, ramped in)
@@ -49,7 +51,8 @@ K = 1.0
 for i in range(PV_CORDIC_ITER):
     K *= math.sqrt(1 + 2.0 ** (-2 * i))
 gain = 3 * math.pi / (3 * math.pi + 8)
-G = 2 * gain * 2 ** PV_INV_SCALE / (K * K)
+PV_GAIN = 0.5
+G = 2 * gain * 2 ** PV_INV_SCALE / (K * K) * PV_GAIN
 def ws(t):
     return 0.25 * (1 + math.cos(2 * math.pi * t / (4 * PV_H))) if abs(t) <= 2 * PV_H else 0.0
 def rho(u):
