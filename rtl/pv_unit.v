@@ -463,22 +463,43 @@ module pv_unit #(
     reg  [5:0]  fillW;
     reg  [15:0] cOld;                    // consumer's oldest needed sequence number
     wire [55:0] step_q = {21'd0, jrate, 8'd0};
-    wire [24:0] f_w0 = {1'b0, jbase} + 25'd64 + {1'b0, fP[55:32]};
-    wire [24:0] f_w1 = f_w0 + 25'd1;
-    wire [18:0] f_line = fHalf ? f_w1[24:6] : f_w0[24:6];
-    wire        f_new  = !fLastV || f_line != fLast;
+    // Both walkers step the same positions: S0 registers the word addresses, S1 assigns
+    // line sequence numbers (line buffer slot = seq & 3). The fetch walker issues a line
+    // request for every new line (registered request, at most 4 lines ahead of the
+    // consumer); the consume walker hands samples to the read stage once filled.
+    wire [56:0] fP_n = {1'b0, fP} + step_q;
+    wire [56:0] cP_n = {1'b0, cP} + step_q;
+    // fetch walker
+    reg         fs0_v;
+    reg  [18:0] fs0_l0, fs0_l1;
+    reg         rq_v;
+    reg  [18:0] rq_l;
+    wire [18:0] f_line  = fHalf ? fs0_l1 : fs0_l0;
+    wire        f_new   = !fLastV || f_line != fLast;
     wire        f_allow = (fSeq - cOld) < 16'd4;
-    assign req_valid = (ph == P_FRAME) && ft < 13'd4096 && f_new && f_allow;
-    assign req_addr  = {f_line, 6'd0};
-    wire [24:0] c_w0 = {1'b0, jbase} + 25'd64 + {1'b0, cP[55:32]};
-    wire [24:0] c_w1 = c_w0 + 25'd1;
-    wire [18:0] c_l0 = c_w0[24:6];
-    wire [18:0] c_l1 = c_w1[24:6];
+    wire        f_free  = !rq_v || req_ready;
+    wire        f_step  = fs0_v && (!f_new || (f_free && f_allow));   // half of the entry done
+    wire        f_done  = f_step && fHalf;
+    wire        f_load  = ft < 13'd4096 && (!fs0_v || f_done);
+    assign req_valid = rq_v;
+    assign req_addr  = {rq_l, 6'd0};
+    // consume walker
+    reg         cs0_v, ce_v;
+    reg  [24:0] cs0_w0, cs0_w1;
+    reg  [15:0] cs0_fr, ce_fr;
+    reg  [11:0] cs0_j, ce_j;
+    reg  [5:0]  ce_w0, ce_w1;
+    reg  [15:0] ce_s0, ce_s1;
+    reg  [12:0] cdone;
+    wire        c_take = ce_v && (fillSeq - ce_s1) != 0 && $signed(fillSeq - ce_s1) > 0;
+    wire        c_s1ld = cs0_v && (!ce_v || c_take);
+    wire        c_s0ld = ct < 13'd4096 && (!cs0_v || c_s1ld);
+    wire [18:0] c_l0 = cs0_w0[24:6];
+    wire [18:0] c_l1 = cs0_w1[24:6];
     wire        c_n0 = !cLastV || c_l0 != cLast;
     wire        c_n1 = c_l1 != c_l0;
     wire [15:0] c_s0 = c_n0 ? cSeq : cSeq - 1'b1;
     wire [15:0] c_s1 = c_n1 ? c_s0 + 1'b1 : c_s0;
-    wire        c_ok = ct < 13'd4096 && (fillSeq - c_s1) != 0 && $signed(fillSeq - c_s1) > 0;
     // consume pipeline
     reg         fr_v1, fr_v2, fr_v3, fr_v4, fr_v5, fr_v6;
     reg  [15:0] fr_fr1, fr_fr2, fr_frq;
@@ -615,8 +636,9 @@ module pv_unit #(
     reg         o_wen, o_wen2;
     // pipelined passes
     reg  [11:0] q;
-    reg  [5:0]  a0v, a0b;
-    reg  [11:0] a0k [0:5];
+    reg  [6:0]  a0v, a0b;
+    reg  [11:0] a0k [0:6];
+    reg  signed [47:0] a0_sxr, a0_sxi, a0_syr, a0_syi, a0_snr, a0_sni;
     reg  signed [27:0] a0e_r [0:2];
     reg  signed [27:0] a0e_i [0:2];
     reg  signed [27:0] a0d_r [0:2];
@@ -632,12 +654,13 @@ module pv_unit #(
     reg         c2b [0:1];
     reg  [11:0] c2k [0:1];
     reg  signed [26:0] c2xa_r, c2xa_i;
-    reg  [5:0]  mv;
-    reg  signed [27:0] me_r [0:5];
-    reg  signed [27:0] me_i [0:5];
-    reg  signed [27:0] md_r [0:5];
-    reg  signed [27:0] md_i [0:5];
-    reg  [11:0] mk [0:5];
+    reg  [6:0]  mv;
+    reg  signed [27:0] me_r [0:6];
+    reg  signed [27:0] me_i [0:6];
+    reg  signed [27:0] md_r [0:6];
+    reg  signed [27:0] md_i [0:6];
+    reg  [11:0] mk [0:6];
+    reg  signed [47:0] c2_zr, c2_zi, c2_wr, c2_wi;
 
     always @(posedge clk) begin
         bk_we[0] <= 0; bk_we[1] <= 0; bk_we[2] <= 0; bk_we[3] <= 0; cu_we <= 0; pk_we <= 0; en_we <= 0; dm_we <= 0;
@@ -645,6 +668,7 @@ module pv_unit #(
         if (rst) begin
             ph <= P_IDLE;
             misses <= 0;
+            rq_v <= 0;
             fillSeq <= 0;
             fillW <= 0;
             for (ii = 0; ii < NS; ii = ii + 1) begin
@@ -856,43 +880,71 @@ module pv_unit #(
                 cSeq <= fillSeq;
                 cOld <= fillSeq;
                 fHalf <= 0;
+                fs0_v <= 0;
+                cs0_v <= 0;
+                ce_v <= 0;
+                cdone <= 0;
                 fr_v1 <= 0; fr_v2 <= 0; fr_v3 <= 0; fr_v4 <= 0; fr_v5 <= 0; fr_v6 <= 0;
                 ph <= P_FRAME;
             end
             // ============================================================ frame
             P_FRAME: begin
-                // fetch generator: one line decision per cycle
-                if (ft < 13'd4096) begin
-                    if (!f_new || (f_allow && req_ready)) begin
-                        if (f_new) begin
-                            fLast <= f_line;
-                            fLastV <= 1;
-                            fSeq <= fSeq + 1'b1;
-                        end
-                        if (fHalf) begin
-                            fHalf <= 0;
-                            ft <= ft + 1'b1;
-                            fP <= ({1'b0, fP} + step_q >= {1'b0, F}) ? fP + step_q - F : fP + step_q;
-                        end else
-                            fHalf <= 1;
+                // ---- fetch walker
+                if (rq_v && req_ready)
+                    rq_v <= 0;
+                if (f_step) begin
+                    if (f_new) begin
+                        rq_v <= 1;
+                        rq_l <= f_line;
+                        fLast <= f_line;
+                        fLastV <= 1;
+                        fSeq <= fSeq + 1'b1;
                     end
+                    fHalf <= !fHalf;
                 end
-                // consumer: one sample per cycle when its lines are in
+                if (f_load) begin
+                    fs0_l0 <= ({1'b0, jbase} + 25'd64 + {1'b0, fP[55:32]}) >> 6;
+                    fs0_l1 <= ({1'b0, jbase} + 25'd65 + {1'b0, fP[55:32]}) >> 6;
+                    fs0_v <= 1;
+                    ft <= ft + 1'b1;
+                    fP <= (fP_n >= {1'b0, F}) ? fP_n[55:0] - F : fP_n[55:0];
+                end else if (f_done)
+                    fs0_v <= 0;
+                // ---- consume walker: read stage takes a filled sample per cycle
                 fr_v1 <= 0;
-                if (c_ok) begin
-                    lb0_ra <= {c_s0[1:0], c_w0[5:0]};
-                    lb1_ra <= {c_s1[1:0], c_w1[5:0]};
-                    cs_a <= ct[11:0] + 12'd2048;           // j = t mod 4096, t = ct - 2048
+                if (c_take) begin
+                    lb0_ra <= {ce_s0[1:0], ce_w0};
+                    lb1_ra <= {ce_s1[1:0], ce_w1};
+                    cs_a <= ce_j;
                     fr_v1 <= 1;
-                    fr_fr1 <= cP[31:16];
-                    fr_j1 <= ct[11:0] + 12'd2048;
+                    fr_fr1 <= ce_fr;
+                    fr_j1 <= ce_j;
+                    cOld <= ce_s0;
+                    cdone <= cdone + 1'b1;
+                end
+                if (c_s1ld) begin
+                    ce_v <= 1;
+                    ce_w0 <= cs0_w0[5:0];
+                    ce_w1 <= cs0_w1[5:0];
+                    ce_s0 <= c_s0;
+                    ce_s1 <= c_s1;
+                    ce_fr <= cs0_fr;
+                    ce_j <= cs0_j;
                     cSeq <= c_s1 + 1'b1;
                     cLast <= c_l1;
                     cLastV <= 1;
-                    cOld <= c_s0;
+                end else if (c_take)
+                    ce_v <= 0;
+                if (c_s0ld) begin
+                    cs0_w0 <= {1'b0, jbase} + 25'd64 + {1'b0, cP[55:32]};
+                    cs0_w1 <= {1'b0, jbase} + 25'd65 + {1'b0, cP[55:32]};
+                    cs0_fr <= cP[31:16];
+                    cs0_j <= ct[11:0] + 12'd2048;            // j = t mod 4096, t = ct - 2048
+                    cs0_v <= 1;
                     ct <= ct + 1'b1;
-                    cP <= ({1'b0, cP} + step_q >= {1'b0, F}) ? cP + step_q - F : cP + step_q;
-                end
+                    cP <= (cP_n >= {1'b0, F}) ? cP_n[55:0] - F : cP_n[55:0];
+                end else if (c_s1ld)
+                    cs0_v <= 0;
                 // pipeline: v1 RAM address -> v2 samples registered -> v3 (s1-s0)*fr, window
                 // -> v4 interpolated sample -> v5 windowed product -> v6 round, pair, write
                 fr_v2 <= fr_v1;
@@ -928,7 +980,7 @@ module pv_unit #(
                         bk_wd[bsel(fr_j6[11:1])] <= {fr_even, fr_xwr[26:0]};
                     end
                 end
-                if (ct == 13'd4096 && !fr_v1 && !fr_v2 && !fr_v3 && !fr_v4 && !fr_v5 && !fr_v6) begin
+                if (cdone == 13'd4096 && !fr_v1 && !fr_v2 && !fr_v3 && !fr_v4 && !fr_v5 && !fr_v6) begin
                     ph <= P_FFT;
                     inv <= 0;
                     st <= 0;
@@ -1055,9 +1107,9 @@ module pv_unit #(
             // pairs k / M-k, 2 cycles per pair: q even reads A = Z[k] (rev(k)), q odd
             // reads B = Z[M-k] (rev(M-k)); X[k] and X[M-k] are written back in place.
             P_A0: begin
-                a0v <= {a0v[4:0], 1'b0};
-                a0b <= {a0b[4:0], 1'b0};
-                for (ii = 1; ii < 6; ii = ii + 1)
+                a0v <= {a0v[5:0], 1'b0};
+                a0b <= {a0b[5:0], 1'b0};
+                for (ii = 1; ii < 7; ii = ii + 1)
                     a0k[ii] <= a0k[ii-1];
                 if (q < 12'd2050) begin : a0iss
                     reg [10:0] kk, la;
@@ -1098,31 +1150,33 @@ module pv_unit #(
                     a0d_r[ii] <= a0d_r[ii-1];
                     a0d_i[ii] <= a0d_i[ii-1];
                 end
-                if (a0v[4] && a0b[4]) begin : a0w
+                if (a0v[4] && a0b[4]) begin
                     // X[k]   = (Er*65536 + c*Di - s*Dr,  Ei*65536 - c*Dr - s*Di) >> 17
                     // X[M-k] = (Er*65536 - c*Di + s*Dr, -Ei*65536 - c*Dr - s*Di) >> 17
-                    reg signed [47:0] sxr, sxi, syr, syi;
-                    reg [10:0] la, kk;
-                    kk = a0k[4][10:0];
-                    sxr = ($signed(a0e_r[2]) <<< 16) + mu_ic - mu_rs;
-                    sxi = ($signed(a0e_i[2]) <<< 16) - mu_rc - mu_is;
-                    syr = ($signed(a0e_r[2]) <<< 16) - mu_ic + mu_rs;
-                    syi = -($signed(a0e_i[2]) <<< 16) - mu_rc - mu_is;
-                    la = rev11(kk);
+                    a0_sxr <= ($signed(a0e_r[2]) <<< 16) + mu_ic - mu_rs;
+                    a0_sxi <= ($signed(a0e_i[2]) <<< 16) - mu_rc - mu_is;
+                    a0_syr <= ($signed(a0e_r[2]) <<< 16) - mu_ic + mu_rs;
+                    a0_syi <= -($signed(a0e_i[2]) <<< 16) - mu_rc - mu_is;
+                    // X[M] (k = 0): c = -1, s = 0
+                    a0_snr <= ($signed(a0e_r[2]) <<< 16) - ($signed(a0d_i[2]) <<< 16);
+                    a0_sni <= ($signed(a0e_i[2]) <<< 16) + ($signed(a0d_r[2]) <<< 16);
+                end
+                if (a0v[5] && a0b[5]) begin : a0w
+                    reg [10:0] la;
+                    la = rev11(a0k[5][10:0]);
                     bk_we[bsel(la)] <= 1;
                     bk_wa[bsel(la)] <= la[9:1];
-                    bk_wd[bsel(la)] <= {sat27((sxr + 48'sd65536) >>> 17), sat27((sxi + 48'sd65536) >>> 17)};
-                    x_ar <= sat27((syr + 48'sd65536) >>> 17);
-                    x_ai <= sat27((syi + 48'sd65536) >>> 17);
-                    if (a0k[4] == 0) begin
-                        // X[M]: c = -1, s = 0
-                        nyq_r <= sat27((($signed(a0e_r[2]) <<< 16) - ($signed(a0d_i[2]) <<< 16) + 48'sd65536) >>> 17);
-                        nyq_i <= sat27((($signed(a0e_i[2]) <<< 16) + ($signed(a0d_r[2]) <<< 16) + 48'sd65536) >>> 17);
+                    bk_wd[bsel(la)] <= {sat27((a0_sxr + 48'sd65536) >>> 17), sat27((a0_sxi + 48'sd65536) >>> 17)};
+                    x_ar <= sat27((a0_syr + 48'sd65536) >>> 17);
+                    x_ai <= sat27((a0_syi + 48'sd65536) >>> 17);
+                    if (a0k[5] == 0) begin
+                        nyq_r <= sat27((a0_snr + 48'sd65536) >>> 17);
+                        nyq_i <= sat27((a0_sni + 48'sd65536) >>> 17);
                     end
                 end
-                if (a0v[5] && a0b[5] && a0k[5] != 0 && a0k[5] != 12'd1024) begin : a0w2
+                if (a0v[6] && a0b[6] && a0k[6] != 0 && a0k[6] != 12'd1024) begin : a0w2
                     reg [10:0] lb;
-                    lb = rev11(11'd0 - a0k[5][10:0]);
+                    lb = rev11(11'd0 - a0k[6][10:0]);
                     bk_we[bsel(lb)] <= 1;
                     bk_wa[bsel(lb)] <= lb[9:1];
                     bk_wd[bsel(lb)] <= {x_ar, x_ai};
@@ -1450,8 +1504,8 @@ module pv_unit #(
                     end
                 end
                 // CORDIC out: A (tag[11] = 0) then B
-                mv <= {mv[4:0], 1'b0};
-                for (ii = 1; ii < 6; ii = ii + 1) begin
+                mv <= {mv[5:0], 1'b0};
+                for (ii = 1; ii < 7; ii = ii + 1) begin
                     me_r[ii] <= me_r[ii-1];
                     me_i[ii] <= me_i[ii-1];
                     md_r[ii] <= md_r[ii-1];
@@ -1478,30 +1532,31 @@ module pv_unit #(
                     mu_c <= cs_c;
                     mu_s <= cs_s;
                 end
-                if (mv[4]) begin : c2w
+                if (mv[4]) begin
                     // Z'[kA] = (Er*65536 - (Dr*s + Di*c),  Ei*65536 + (Dr*c - Di*s)) >> 18
                     // Z'[kB] = (Er*65536 + (Dr*s + Di*c), -Ei*65536 + (Dr*c - Di*s)) >> 18
-                    reg signed [47:0] zr_, zi_, wr_, wi_;
+                    c2_zr <= ($signed(me_r[4]) <<< 16) - (mu_rs + mu_ic);
+                    c2_zi <= ($signed(me_i[4]) <<< 16) + (mu_rc - mu_is);
+                    c2_wr <= ($signed(me_r[4]) <<< 16) + (mu_rs + mu_ic);
+                    c2_wi <= -($signed(me_i[4]) <<< 16) + (mu_rc - mu_is);
+                end
+                if (mv[5]) begin : c2w
                     reg [10:0] ka;
-                    zr_ = ($signed(me_r[4]) <<< 16) - (mu_rs + mu_ic);
-                    zi_ = ($signed(me_i[4]) <<< 16) + (mu_rc - mu_is);
-                    wr_ = ($signed(me_r[4]) <<< 16) + (mu_rs + mu_ic);
-                    wi_ = -($signed(me_i[4]) <<< 16) + (mu_rc - mu_is);
-                    ka = mk[4][10:0];
+                    ka = mk[5][10:0];
                     bk_we[bsel(ka)] <= 1;
                     bk_wa[bsel(ka)] <= ka[9:1];
-                    bk_wd[bsel(ka)] <= {sat27((zr_ + 48'sd131072) >>> 18), sat27((zi_ + 48'sd131072) >>> 18)};
-                    x_ar <= sat27((wr_ + 48'sd131072) >>> 18);
-                    x_ai <= sat27((wi_ + 48'sd131072) >>> 18);
+                    bk_wd[bsel(ka)] <= {sat27((c2_zr + 48'sd131072) >>> 18), sat27((c2_zi + 48'sd131072) >>> 18)};
+                    x_ar <= sat27((c2_wr + 48'sd131072) >>> 18);
+                    x_ai <= sat27((c2_wi + 48'sd131072) >>> 18);
                 end
-                if (mv[5] && mk[5] != 0 && mk[5] != 12'd1024) begin : c2w2
+                if (mv[6] && mk[6] != 0 && mk[6] != 12'd1024) begin : c2w2
                     reg [10:0] kb;
-                    kb = 11'd0 - mk[5][10:0];
+                    kb = 11'd0 - mk[6][10:0];
                     bk_we[bsel(kb)] <= 1;
                     bk_wa[bsel(kb)] <= kb[9:1];
                     bk_wd[bsel(kb)] <= {x_ar, x_ai};
                 end
-                if (mv[5] && mk[5] == 12'd1024) begin
+                if (mv[6] && mk[6] == 12'd1024) begin
                     // last pair written: keep the slot history scalars, inverse transform
                     h_valid[js] <= 1;
                     h_pos[js] <= pos;
