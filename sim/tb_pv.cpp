@@ -304,6 +304,15 @@ int main(int argc, char** argv) {
         while (top->busy && cycles - t0 < 2000000) {
             tick();
             const int phn = top->rootp->pv_unit__DOT__ph;
+            if (phn == 16 && top->rootp->pv_unit__DOT__cv[18] && stageFails == 0) {
+                auto* r = top->rootp;
+                const uint32_t tag = r->pv_unit__DOT__ctag[18];
+                const int k = tag & 2047, isB = tag >> 11;
+                const int bin = isB ? 2048 - k : k;
+                const int64_t xr = sx(r->pv_unit__DOT__cx[18], 31), yr = sx(r->pv_unit__DOT__cy[18], 31);
+                check("cordic.x", (xr + 2) >> 2, dbg.xpr[bin], bin);
+                check("cordic.y", (yr + 2) >> 2, dbg.xpi[bin], bin);
+            }
             if (phn != lastPh) {
                 const int before = stageFails;
                 stageCompare(phn);

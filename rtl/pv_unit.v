@@ -390,6 +390,8 @@ module pv_unit #(
     wire signed [24:0]  co_zr  = (cz[CI] + 25'sd128) >>> 8;
     wire [26:0]         co_mag = co_xr[26:0];
     wire [15:0]         co_ph  = co_zr[15:0];
+    wire signed [26:0]  co_xs  = co_xr[26:0];   // part-selects are unsigned: keep signed copies
+    wire signed [26:0]  co_ys  = co_yr[26:0];
 
     // ================================================================== main FSM
     localparam
@@ -481,9 +483,6 @@ module pv_unit #(
     reg  [15:0] c_dl;
     // C2 / OLA scratch
     reg  signed [26:0] x_ar, x_ai;
-    reg  [15:0] c2_L [0:1];
-    reg  [15:0] c2_ph [0:1];
-    reg  [15:0] c2_rot [0:1];
 
     integer ii;
 
@@ -493,7 +492,7 @@ module pv_unit #(
     reg  [12:0] ocnt;
     reg  signed [44:0] o_prod;
     reg  signed [27:0] o_y;
-    reg  [3:0]  ov;
+    reg  [3:0]  ov;  // OLA tokens
     reg  [11:0] o_addr [0:3];
     reg  [31:0] o_time [0:3];
     reg  [16:0] o_w;
@@ -528,20 +527,43 @@ module pv_unit #(
     reg  [15:0] a1_ph, a1_Lv;
 
     // C2
-    reg  [11:0] c2_ka;
-    reg  signed [26:0] c2_xr [0:1];
-    reg  signed [26:0] c2_xi [0:1];
-    reg         c2_have;
-    reg  [3:0]  c2v;
-    reg  [11:0] c2_kk [0:3];
-    reg  signed [27:0] c2_er, c2_ei;
 
     // pass C1 read pipeline
     reg  [2:0]  c1v;
-    reg  [11:0] c1_n [0:2];
 
-    // OLA element pipeline
+    // OLA pipeline
     reg  signed [26:0] o_yr, o_yi;
+    reg         ol_odd;
+    reg         o_mk [0:3];
+    reg         o_odd [0:3];
+    reg  [10:0] o_la, o_lap;
+    reg  signed [27:0] o_rq;
+    reg         o_wen;
+    // pipelined passes
+    reg  [11:0] q;
+    reg  [5:0]  a0v, a0b;
+    reg  [11:0] a0k [0:5];
+    reg  signed [27:0] a0e_r [0:2];
+    reg  signed [27:0] a0e_i [0:2];
+    reg  signed [27:0] a0d_r [0:2];
+    reg  signed [27:0] a0d_i [0:2];
+    reg  [4:0]  b1v;
+    reg  [10:0] b1i [0:4];
+    reg  [11:0] b1pk [0:4];
+    reg  [11:0] b1en [0:4];
+    reg  [1:0]  c_ld;
+    reg  [11:0] c1n [0:2];
+    reg  [15:0] c1d [0:2];
+    reg  [1:0]  c2v;
+    reg         c2b [0:1];
+    reg  [11:0] c2k [0:1];
+    reg  signed [26:0] c2xa_r, c2xa_i;
+    reg  [5:0]  mv;
+    reg  signed [27:0] me_r [0:5];
+    reg  signed [27:0] me_i [0:5];
+    reg  signed [27:0] md_r [0:5];
+    reg  signed [27:0] md_i [0:5];
+    reg  [11:0] mk [0:5];
 
     always @(posedge clk) begin
         b0_we <= 0; b1_we <= 0; cu_we <= 0; pk_we <= 0; en_we <= 0; dm_we <= 0;
@@ -887,12 +909,15 @@ module pv_unit #(
                     if (st == 4'd10) begin
                         if (ph == P_FFT) begin
                             ph <= P_A0;
-                            k <= 0;
-                            pc <= 0;
+                            q <= 0;
+                            a0v <= 0;
+                            a0b <= 0;
                         end else begin
                             ph <= jwin == 2'd1 ? P_FADE : P_OLA;
                             t13 <= 0;
                             pc <= 0;
+                            ol_odd <= 0;
+                            ov <= 0;
                             if ($signed(now - jdl) >= 0)
                                 misses <= misses + 1'b1;
                         end
@@ -904,111 +929,92 @@ module pv_unit #(
                 end
             end
             // ============================================================ A0: split
-            P_A0: case (pc)
-                0: begin   // read A = Z[k] (loc rev(k)), then B = Z[M-k]
-                    begin : rdA
-                        reg [10:0] la;
-                        la = rev11(k[10:0]);
-                        b0_ra <= la[10:1];
-                        b1_ra <= la[10:1];
-                    end
-                    cs_a <= k;
-                    pc <= 1;
+            // pairs k / M-k, 2 cycles per pair: q even reads A = Z[k] (rev(k)), q odd
+            // reads B = Z[M-k] (rev(M-k)); X[k] and X[M-k] are written back in place.
+            P_A0: begin
+                a0v <= {a0v[4:0], 1'b0};
+                a0b <= {a0b[4:0], 1'b0};
+                for (ii = 1; ii < 6; ii = ii + 1)
+                    a0k[ii] <= a0k[ii-1];
+                if (q < 12'd2050) begin : a0iss
+                    reg [10:0] kk, la;
+                    kk = q[11:1];
+                    la = q[0] ? rev11(11'd0 - kk) : rev11(kk);
+                    b0_ra <= la[10:1];
+                    b1_ra <= la[10:1];
+                    if (!q[0])
+                        cs_a <= {1'b0, kk};
+                    a0v[0] <= 1;
+                    a0b[0] <= q[0];
+                    a0k[0] <= q[11:1];
+                    q <= q + 1'b1;
                 end
-                1: begin
-                    begin : rdB
-                        reg [10:0] lb;
-                        lb = rev11(11'd0 - k[10:0]);
-                        b0_ra <= lb[10:1];
-                        b1_ra <= lb[10:1];
-                    end
-                    pc <= 2;
-                end
-                2: begin
-                    begin : gA
-                        reg [10:0] la;
-                        la = rev11(k[10:0]);
-                        if (par11(la)) begin a_ar <= b1_q[53:27]; a_ai <= b1_q[26:0]; end
-                        else           begin a_ar <= b0_q[53:27]; a_ai <= b0_q[26:0]; end
-                    end
-                    pc <= 3;
-                end
-                3: begin
-                    begin : gB
-                        reg [10:0] lb;
-                        reg signed [DW-1:0] br, bi;
-                        lb = rev11(11'd0 - k[10:0]);
-                        if (par11(lb)) begin br = b1_q[53:27]; bi = b1_q[26:0]; end
-                        else           begin br = b0_q[53:27]; bi = b0_q[26:0]; end
-                        // B = conj(Z[M-k])
-                        a_er <= a_ar + br;
-                        a_ei <= a_ai - bi;
-                        mu_dr <= a_ar - br;
-                        mu_di <= a_ai + bi;
-                        a_dr <= a_ar - br;
-                        a_di <= a_ai + bi;
+                if (a0v[1]) begin : a0d
+                    reg [10:0] la;
+                    reg signed [DW-1:0] zr_, zi_;
+                    la = a0b[1] ? rev11(11'd0 - a0k[1][10:0]) : rev11(a0k[1][10:0]);
+                    if (par11(la)) begin zr_ = b1_q[53:27]; zi_ = b1_q[26:0]; end
+                    else           begin zr_ = b0_q[53:27]; zi_ = b0_q[26:0]; end
+                    if (!a0b[1]) begin
+                        a_ar <= zr_;
+                        a_ai <= zi_;
+                    end else begin
+                        // B = conj(Z[M-k]): E = A + B, D = A - B
+                        a0e_r[0] <= a_ar + zr_;
+                        a0e_i[0] <= a_ai - zi_;
+                        a0d_r[0] <= a_ar - zr_;
+                        a0d_i[0] <= a_ai + zi_;
+                        mu_dr <= a_ar - zr_;
+                        mu_di <= a_ai + zi_;
                         mu_c <= cs_c;
                         mu_s <= cs_s;
                     end
-                    pc <= 4;
                 end
-                4: pc <= 5;
-                5: pc <= 6;
-                6: begin : wrX
-                    // X[k] = ((E*65536 + (c*Di - s*Dr)) , (Ei*65536 - c*Dr - s*Di)) >> 17
+                for (ii = 1; ii < 3; ii = ii + 1) begin
+                    a0e_r[ii] <= a0e_r[ii-1];
+                    a0e_i[ii] <= a0e_i[ii-1];
+                    a0d_r[ii] <= a0d_r[ii-1];
+                    a0d_i[ii] <= a0d_i[ii-1];
+                end
+                if (a0v[4] && a0b[4]) begin : a0w
+                    // X[k]   = (Er*65536 + c*Di - s*Dr,  Ei*65536 - c*Dr - s*Di) >> 17
                     // X[M-k] = (Er*65536 - c*Di + s*Dr, -Ei*65536 - c*Dr - s*Di) >> 17
                     reg signed [47:0] sxr, sxi, syr, syi;
-                    reg signed [DW-1:0] Xr, Xi, Yr, Yi;
-                    reg [10:0] la, lb;
-                    sxr = ($signed(a_er) <<< 16) + mu_ic - mu_rs;
-                    sxi = ($signed(a_ei) <<< 16) - mu_rc - mu_is;
-                    syr = ($signed(a_er) <<< 16) - mu_ic + mu_rs;
-                    syi = -($signed(a_ei) <<< 16) - mu_rc - mu_is;
-                    Xr = sat27((sxr + 48'sd65536) >>> 17);
-                    Xi = sat27((sxi + 48'sd65536) >>> 17);
-                    Yr = sat27((syr + 48'sd65536) >>> 17);
-                    Yi = sat27((syi + 48'sd65536) >>> 17);
-                    la = rev11(k[10:0]);
-                    lb = rev11(11'd0 - k[10:0]);
-                    if (k == 0) begin
-                        // X[0] in place, X[M] (c = -1, s = 0: Er*65536 + 65536*... ) to the Nyquist register
-                        b0_we <= 1; b0_wa <= 0; b0_wd <= {Xr, Xi};
-                        nyq_r <= sat27((($signed(a_er) <<< 16) - (($signed(a_di)) <<< 16) + 48'sd65536) >>> 17);
-                        nyq_i <= sat27((($signed(a_ei) <<< 16) + (($signed(a_dr)) <<< 16) + 48'sd65536) >>> 17);
-                    end else begin
-                        if (par11(la)) begin b1_we <= 1; b1_wa <= la[10:1]; b1_wd <= {Xr, Xi}; end
-                        else           begin b0_we <= 1; b0_wa <= la[10:1]; b0_wd <= {Xr, Xi}; end
-                        x_ar <= Yr;
-                        x_ai <= Yi;
-                    end
-                    pc <= (k == 0 || k == 12'd1024) ? 5'd8 : 5'd7;
-                end
-                7: begin
-                    begin : wrY
-                        reg [10:0] lb;
-                        lb = rev11(11'd0 - k[10:0]);
-                        if (par11(lb)) begin b1_we <= 1; b1_wa <= lb[10:1]; b1_wd <= {x_ar, x_ai}; end
-                        else           begin b0_we <= 1; b0_wa <= lb[10:1]; b0_wd <= {x_ar, x_ai}; end
-                    end
-                    pc <= 8;
-                end
-                8: begin
-                    if (k == 12'd1024) begin
-                        ph <= P_A1;
-                        k <= 0;
-                        pc <= 0;
-                        a1_desc <= 0;
-                        a1_cnt <= 0;
-                        a1_best <= 0;
-                        a1_strong <= 0;
-                        a1_m <= 0;
-                        pv <= 0;
-                    end else begin
-                        k <= k + 1'b1;
-                        pc <= 0;
+                    reg [10:0] la, kk;
+                    kk = a0k[4][10:0];
+                    sxr = ($signed(a0e_r[2]) <<< 16) + mu_ic - mu_rs;
+                    sxi = ($signed(a0e_i[2]) <<< 16) - mu_rc - mu_is;
+                    syr = ($signed(a0e_r[2]) <<< 16) - mu_ic + mu_rs;
+                    syi = -($signed(a0e_i[2]) <<< 16) - mu_rc - mu_is;
+                    la = rev11(kk);
+                    if (par11(la)) begin b1_we <= 1; b1_wa <= la[10:1]; b1_wd <= {sat27((sxr + 48'sd65536) >>> 17), sat27((sxi + 48'sd65536) >>> 17)}; end
+                    else           begin b0_we <= 1; b0_wa <= la[10:1]; b0_wd <= {sat27((sxr + 48'sd65536) >>> 17), sat27((sxi + 48'sd65536) >>> 17)}; end
+                    x_ar <= sat27((syr + 48'sd65536) >>> 17);
+                    x_ai <= sat27((syi + 48'sd65536) >>> 17);
+                    if (a0k[4] == 0) begin
+                        // X[M]: c = -1, s = 0
+                        nyq_r <= sat27((($signed(a0e_r[2]) <<< 16) - ($signed(a0d_i[2]) <<< 16) + 48'sd65536) >>> 17);
+                        nyq_i <= sat27((($signed(a0e_i[2]) <<< 16) + ($signed(a0d_r[2]) <<< 16) + 48'sd65536) >>> 17);
                     end
                 end
-            endcase
+                if (a0v[5] && a0b[5] && a0k[5] != 0 && a0k[5] != 12'd1024) begin : a0w2
+                    reg [10:0] lb;
+                    lb = rev11(11'd0 - a0k[5][10:0]);
+                    if (par11(lb)) begin b1_we <= 1; b1_wa <= lb[10:1]; b1_wd <= {x_ar, x_ai}; end
+                    else           begin b0_we <= 1; b0_wa <= lb[10:1]; b0_wd <= {x_ar, x_ai}; end
+                end
+                if (q == 12'd2050 && a0v == 0) begin
+                    ph <= P_A1;
+                    k <= 0;
+                    pc <= 0;
+                    a1_desc <= 0;
+                    a1_cnt <= 0;
+                    a1_best <= 0;
+                    a1_strong <= 0;
+                    a1_m <= 0;
+                    pv <= 0;
+                end
+            end
             // ============================================================ A1
             P_A1: begin
                 // issue: read X[k] (Nyquist from register) into the CORDIC
@@ -1109,62 +1115,63 @@ module pv_unit #(
                 if (pc == 2) begin
                     strongest <= a1_strong;
                     ph <= P_B1;
+                    q <= 0;
+                    b1v <= 0;
+                end
+            end
+            // ============================================================ B1: transient suppression
+            // one partial per cycle: peak/end -> L[peak], pL[peak], L[end] -> decision
+            P_B1: begin
+                b1v <= {b1v[3:0], 1'b0};
+                for (ii = 1; ii < 5; ii = ii + 1) begin
+                    b1i[ii] <= b1i[ii-1];
+                    b1pk[ii] <= b1pk[ii-1];
+                    b1en[ii] <= b1en[ii-1];
+                end
+                if (q < {1'b0, P}) begin
+                    pk_ra <= q[9:0];
+                    en_ra <= q[9:0];
+                    b1v[0] <= 1;
+                    b1i[0] <= q[10:0];
+                    q <= q + 1'b1;
+                end
+                if (b1v[1]) begin
+                    cu_ra <= pk_q[10:0];
+                    lc_ra <= en_q[10:0];
+                    hi_ra <= {js, pk_q[10:0]};
+                    b1pk[2] <= pk_q;
+                    b1en[2] <= en_q;
+                end
+                if (b1v[3]) begin : b1dec
+                    reg [15:0] Lpk, pLpk, Len;
+                    reg [10:0] i;
+                    reg trans;
+                    i = b1i[3];
+                    Lpk  = b1pk[3] == 12'd2048 ? n_L : cu_q[47:32];
+                    pLpk = b1pk[3] == 12'd2048 ? h_nL[js] : hi_q[47:32];
+                    Len  = b1en[3] == 12'd2048 ? n_L : (b1en[3] == 12'd2049 ? 16'd0 : lc_q);
+                    trans = cont && !jnotr && i != 0 && i != P - 1'b1 && i != strongest
+                         && $signed({1'b0, Lpk}) > $signed({1'b0, pLpk}) + 18'sd599;
+                    if (i == 0) begin
+                        b_endp <= b1en[3];
+                        b_lendp <= Len;
+                    end else if (trans && b_lendp > Len) begin
+                        en_we <= 1; en_wa <= i[9:0] - 1'b1; en_wd <= b1en[3];   // end[i-1] = end[i]
+                        b_endp <= b1en[3];
+                        b_lendp <= Len;
+                    end else if (trans) begin
+                        en_we <= 1; en_wa <= i[9:0]; en_wd <= b_endp;            // end[i] = end[i-1]
+                    end else begin
+                        b_endp <= b1en[3];
+                        b_lendp <= Len;
+                    end
+                end
+                if (q == {1'b0, P} && b1v == 0) begin
+                    ph <= P_B2;
                     k <= 0;
                     pc <= 0;
                     pv <= 0;
                 end
-            end
-            // ============================================================ B1: transient suppression
-            P_B1: begin
-                // i = k: read peak/end; then L[peak], pL[peak], L[end]; 1 partial per 3 cycles
-                case (pc)
-                0: begin
-                    pk_ra <= k[9:0];
-                    en_ra <= k[9:0];
-                    pc <= 1;
-                end
-                1: pc <= 2;
-                2: begin
-                    cu_ra <= pk_q[10:0];
-                    lc_ra <= en_q[10:0];
-                    hi_ra <= {js, pk_q[10:0]};
-                    pp_pk[0] <= pk_q;
-                    pp_pk[1] <= en_q;
-                    pc <= 3;
-                end
-                3: pc <= 4;
-                4: begin : b1dec
-                    reg [15:0] Lpk, pLpk, Len;
-                    reg trans;
-                    Lpk  = pp_pk[0] == 12'd2048 ? n_L : cu_q[47:32];
-                    pLpk = pp_pk[0] == 12'd2048 ? h_nL[js] : hi_q[47:32];
-                    Len  = pp_pk[1] == 12'd2048 ? n_L : (pp_pk[1] == 12'd2049 ? 16'd0 : lc_q);
-                    trans = cont && !jnotr && k != 0 && k != P - 1'b1 && k[10:0] != strongest
-                         && $signed({1'b0, Lpk}) > $signed({1'b0, pLpk}) + 18'sd599;
-                    if (k == 0) begin
-                        b_endp <= pp_pk[1];
-                        b_lendp <= Len;
-                    end else if (trans && b_lendp > Len) begin
-                        // end[i-1] = end[i]
-                        en_we <= 1; en_wa <= k[9:0] - 1'b1; en_wd <= pp_pk[1];
-                        b_endp <= pp_pk[1];
-                        b_lendp <= Len;
-                    end else if (trans) begin
-                        // end[i] = end[i-1]
-                        en_we <= 1; en_wa <= k[9:0]; en_wd <= b_endp;
-                    end else begin
-                        b_endp <= pp_pk[1];
-                        b_lendp <= Len;
-                    end
-                    if (k == P - 1'b1) begin
-                        ph <= P_B2;
-                        k <= 0;
-                        pv <= 0;
-                    end else
-                        k <= k + 1'b1;
-                    pc <= 0;
-                end
-                endcase
             end
             // ============================================================ B2: phase advance per partial
             P_B2: begin
@@ -1212,179 +1219,167 @@ module pv_unit #(
                     dm_wa <= pp_i[5][9:0];
                     dm_wd <= cont ? (b2_prot2 - b2_off2 + st16 - b2_rotF2) : -b2_rotF2;
                 end
-                if (k >= {1'b0, P} && pv == 0 && !pv[0]) begin
+                if (k >= {1'b0, P} && pv == 0) begin
                     ph <= P_C1;
                     k <= 0;
-                    pc <= 0;
                     c_i <= 0;
+                    en_ra <= 0;
+                    dm_ra <= 0;
+                    c_ld <= 2'd2;
                     c1v <= 0;
                 end
             end
             // ============================================================ C1: rot[n] = rotF[n] + delta
-            P_C1: case (pc)
-                0: begin   // load partial c_i
-                    en_ra <= c_i[9:0];
-                    dm_ra <= c_i[9:0];
-                    pc <= 1;
-                end
-                1: pc <= 2;
-                2: begin
-                    c_end <= en_q;
-                    c_dl <= dm_q;
-                    pc <= 3;
-                end
-                3: begin
-                    // advance while n >= end and i < P-1
+            // one bin per cycle; moving to the next partial costs two cycles
+            P_C1: begin
+                c1v <= {c1v[1:0], 1'b0};
+                c1n[1] <= c1n[0];
+                c1d[1] <= c1d[0];
+                if (c_ld != 0) begin
+                    c_ld <= c_ld - 1'b1;
+                    if (c_ld == 2'd1) begin
+                        c_end <= en_q;
+                        c_dl <= dm_q;
+                    end
+                end else if (k <= 12'd2047) begin
                     if (c_i < P - 1'b1 && k >= c_end) begin
                         c_i <= c_i + 1'b1;
-                        pc <= 0;
+                        en_ra <= c_i[9:0] + 1'b1;
+                        dm_ra <= c_i[9:0] + 1'b1;
+                        c_ld <= 2'd2;
                     end else begin
-                        if (k == 12'd2048) begin
-                            // bin 2048: rot = rot[2047] (set below)
-                            ph <= P_C2;
-                            k <= 0;
-                            pc <= 0;
-                            c2v <= 0;
-                        end else begin
-                            cu_ra <= k[10:0];
-                            pc <= 4;
-                        end
+                        cu_ra <= k[10:0];
+                        c1v[0] <= 1;
+                        c1n[0] <= k;
+                        c1d[0] <= c_dl;
+                        k <= k + 1'b1;
                     end
                 end
-                4: pc <= 5;
-                5: begin : c1w
+                if (c1v[1]) begin : c1w
                     reg [15:0] r;
-                    r = cu_q[15:0] + c_dl;
+                    r = cu_q[15:0] + c1d[1];
                     cu_we <= 1;
-                    cu_wa <= k[10:0];
+                    cu_wa <= c1n[1][10:0];
                     cu_wd <= {cu_q[74:16], r};
-                    if (k == 12'd2047)
-                        n_rot <= r;
-                    k <= k + 1'b1;
-                    pc <= 3;
+                    if (c1n[1] == 12'd2047)
+                        n_rot <= r;     // bin 2048: rot = rot[2047]
                 end
-            endcase
+                if (k == 12'd2048 && c_ld == 0 && c1v == 0) begin
+                    ph <= P_C2;
+                    q <= 0;
+                    c2v <= 0;
+                    mv <= 0;
+                end
+            end
             // ============================================================ C2: resynthesis + merge
-            P_C2: case (pc)
-                0: begin   // pair kA = k, kB = M - k (k = 0: kB = 2048)
-                    cu_ra <= k[10:0];
-                    pc <= 1;
+            // pairs kA = k, kB = M - k (k = 0: kB = 2048), 2 cycles per pair:
+            // cur -> CORDIC rotation -> E/D -> twiddle products -> Z'[kA], Z'[kB]
+            P_C2: begin
+                c2v <= {c2v[0], 1'b0};
+                c2b[1] <= c2b[0];
+                c2k[1] <= c2k[0];
+                if (q < 12'd2050) begin : c2iss
+                    reg [11:0] kk;
+                    kk = {1'b0, q[11:1]};
+                    cu_ra <= q[0] ? ((12'd2048 - kk) & 12'h7FF) : kk;
+                    c2v[0] <= 1;
+                    c2b[0] <= q[0];
+                    c2k[0] <= kk;
+                    q <= q + 1'b1;
                 end
-                1: begin
-                    cu_ra <= (12'd2048 - k) & 12'h7FF;
-                    pc <= 2;
-                end
-                2: begin : c2a
-                    reg [15:0] phA, outA;
-                    phA = cu_q[31:16];
-                    outA = (rev ? -phA : phA) + cu_q[15:0];
-                    co_in_v <= 1; co_in_rot <= 1; co_in_x <= cu_q[74:48]; co_in_y <= 0;
-                    co_in_ph <= outA; co_in_tag <= 0;
-                    c2_L[0] <= cu_q[47:32]; c2_ph[0] <= phA; c2_rot[0] <= cu_q[15:0];
-                    pc <= 3;
-                end
-                3: begin : c2b
+                if (c2v[1]) begin : c2in
                     reg [26:0] mg;
-                    reg [15:0] Lb, phB, rtB, outB;
-                    if (k == 0) begin
-                        mg = n_mag; Lb = n_L; phB = n_ph; rtB = n_rot;
-                    end else begin
-                        mg = cu_q[74:48]; Lb = cu_q[47:32]; phB = cu_q[31:16]; rtB = cu_q[15:0];
-                    end
-                    outB = (rev ? -phB : phB) + rtB;
-                    co_in_v <= 1; co_in_rot <= 1; co_in_x <= mg; co_in_y <= 0;
-                    co_in_ph <= outB; co_in_tag <= 1;
-                    c2_L[1] <= Lb; c2_ph[1] <= phB; c2_rot[1] <= rtB;
-                    pc <= 4;
-                end
-                4: begin
-                    // history writes (bin kA now, kB next cycle)
-                    hi_we <= 1;
-                    hi_wa <= {js, k[10:0]};
-                    hi_wd <= {c2_L[0], c2_ph[0], c2_rot[0]};
-                    pc <= 5;
-                end
-                5: begin
-                    if (k == 0) begin
-                        h_nL[js] <= c2_L[1]; h_nph[js] <= c2_ph[1]; h_nrot[js] <= c2_rot[1];
-                    end else if (k != 12'd1024) begin
+                    reg [15:0] Lx, phx, rtx;
+                    reg nyq;
+                    nyq = c2b[1] && c2k[1] == 0;
+                    mg  = nyq ? n_mag : cu_q[74:48];
+                    Lx  = nyq ? n_L   : cu_q[47:32];
+                    phx = nyq ? n_ph  : cu_q[31:16];
+                    rtx = nyq ? n_rot : cu_q[15:0];
+                    co_in_v <= 1;
+                    co_in_rot <= 1;
+                    co_in_x <= mg;
+                    co_in_y <= 0;
+                    co_in_ph <= (rev ? -phx : phx) + rtx;
+                    co_in_tag <= {c2b[1], c2k[1][10:0]};
+                    if (!c2b[1]) begin
                         hi_we <= 1;
-                        hi_wa <= {js, 11'd2048 - k[10:0]};
-                        hi_wd <= {c2_L[1], c2_ph[1], c2_rot[1]};
+                        hi_wa <= {js, c2k[1][10:0]};
+                        hi_wd <= {Lx, phx, rtx};
+                    end else if (nyq) begin
+                        h_nL[js] <= Lx;
+                        h_nph[js] <= phx;
+                        h_nrot[js] <= rtx;
+                    end else if (c2k[1] != 12'd1024) begin
+                        hi_we <= 1;
+                        hi_wa <= {js, 11'd0 - c2k[1][10:0]};
+                        hi_wd <= {Lx, phx, rtx};
                     end
-                    pc <= 6;
                 end
-                6: begin   // wait for the CORDIC
-                    if (co_v && co_tag == 0) begin
-                        c2_xr[0] <= co_xr[26:0];
-                        c2_xi[0] <= co_yr[26:0];
-                        pc <= 7;
-                    end
+                // CORDIC out: A (tag[11] = 0) then B
+                mv <= {mv[4:0], 1'b0};
+                for (ii = 1; ii < 6; ii = ii + 1) begin
+                    me_r[ii] <= me_r[ii-1];
+                    me_i[ii] <= me_i[ii-1];
+                    md_r[ii] <= md_r[ii-1];
+                    md_i[ii] <= md_i[ii-1];
+                    mk[ii] <= mk[ii-1];
                 end
-                7: begin : c2m
+                if (co_v && !co_tag[11]) begin
+                    c2xa_r <= co_xr[26:0];
+                    c2xa_i <= co_yr[26:0];
+                    cs_a <= {1'b0, co_tag[10:0]};
+                end
+                if (co_v && co_tag[11]) begin
                     // E = XA + conj(XB), D = XA - conj(XB)
-                    reg signed [26:0] br, bi;
-                    br = co_xr[26:0];
-                    bi = co_yr[26:0];
-                    c2_er <= c2_xr[0] + br;
-                    c2_ei <= c2_xi[0] - bi;
-                    mu_dr <= c2_xr[0] - br;
-                    mu_di <= c2_xi[0] + bi;
-                    cs_a <= k;
-                    pc <= 8;
+                    me_r[0] <= c2xa_r + co_xs;
+                    me_i[0] <= c2xa_i - co_ys;
+                    md_r[0] <= c2xa_r - co_xs;
+                    md_i[0] <= c2xa_i + co_ys;
+                    mk[0] <= {1'b0, co_tag[10:0]};
+                    mv[0] <= 1;
                 end
-                8: pc <= 9;     // cs latency (cs_c valid two cycles after cs_a)
-                9: pc <= 10;
-                10: begin
+                if (mv[1]) begin
+                    mu_dr <= md_r[1];
+                    mu_di <= md_i[1];
                     mu_c <= cs_c;
                     mu_s <= cs_s;
-                    pc <= 11;
                 end
-                11: pc <= 12;
-                12: pc <= 13;
-                13: begin : c2w
-                    // Z'[kA] = ((Er*65536 - (Dr*s + Di*c)), (Ei*65536 + (Dr*c - Di*s))) >> 18
-                    // Z'[kB] = ((Er*65536 + (Dr*s + Di*c)), (-Ei*65536 + (Dr*c - Di*s))) >> 18
-                    reg signed [47:0] zr, zi, wr, wi;
-                    reg [10:0] ka, kb;
-                    zr = ($signed(c2_er) <<< 16) - (mu_rs + mu_ic);
-                    zi = ($signed(c2_ei) <<< 16) + (mu_rc - mu_is);
-                    wr = ($signed(c2_er) <<< 16) + (mu_rs + mu_ic);
-                    wi = -($signed(c2_ei) <<< 16) + (mu_rc - mu_is);
-                    ka = k[10:0];
-                    kb = 11'd0 - k[10:0];
-                    if (par11(ka)) begin b1_we <= 1; b1_wa <= ka[10:1]; b1_wd <= {sat27((zr + 48'sd131072) >>> 18), sat27((zi + 48'sd131072) >>> 18)}; end
-                    else           begin b0_we <= 1; b0_wa <= ka[10:1]; b0_wd <= {sat27((zr + 48'sd131072) >>> 18), sat27((zi + 48'sd131072) >>> 18)}; end
-                    x_ar <= sat27((wr + 48'sd131072) >>> 18);
-                    x_ai <= sat27((wi + 48'sd131072) >>> 18);
-                    pc <= (k == 0 || k == 12'd1024) ? 5'd15 : 5'd14;
+                if (mv[4]) begin : c2w
+                    // Z'[kA] = (Er*65536 - (Dr*s + Di*c),  Ei*65536 + (Dr*c - Di*s)) >> 18
+                    // Z'[kB] = (Er*65536 + (Dr*s + Di*c), -Ei*65536 + (Dr*c - Di*s)) >> 18
+                    reg signed [47:0] zr_, zi_, wr_, wi_;
+                    reg [10:0] ka;
+                    zr_ = ($signed(me_r[4]) <<< 16) - (mu_rs + mu_ic);
+                    zi_ = ($signed(me_i[4]) <<< 16) + (mu_rc - mu_is);
+                    wr_ = ($signed(me_r[4]) <<< 16) + (mu_rs + mu_ic);
+                    wi_ = -($signed(me_i[4]) <<< 16) + (mu_rc - mu_is);
+                    ka = mk[4][10:0];
+                    if (par11(ka)) begin b1_we <= 1; b1_wa <= ka[10:1]; b1_wd <= {sat27((zr_ + 48'sd131072) >>> 18), sat27((zi_ + 48'sd131072) >>> 18)}; end
+                    else           begin b0_we <= 1; b0_wa <= ka[10:1]; b0_wd <= {sat27((zr_ + 48'sd131072) >>> 18), sat27((zi_ + 48'sd131072) >>> 18)}; end
+                    x_ar <= sat27((wr_ + 48'sd131072) >>> 18);
+                    x_ai <= sat27((wi_ + 48'sd131072) >>> 18);
                 end
-                14: begin : c2w2
+                if (mv[5] && mk[5] != 0 && mk[5] != 12'd1024) begin : c2w2
                     reg [10:0] kb;
-                    kb = 11'd0 - k[10:0];
+                    kb = 11'd0 - mk[5][10:0];
                     if (par11(kb)) begin b1_we <= 1; b1_wa <= kb[10:1]; b1_wd <= {x_ar, x_ai}; end
                     else           begin b0_we <= 1; b0_wa <= kb[10:1]; b0_wd <= {x_ar, x_ai}; end
-                    pc <= 15;
                 end
-                15: begin
-                    if (k == 12'd1024) begin
-                        // keep slot history scalars
-                        h_valid[js] <= 1;
-                        h_pos[js] <= pos;
-                        h_err[js] <= err;
-                        h_rev[js] <= rev;
-                        ph <= P_IFFT;
-                        inv <= 1;
-                        st <= 0;
-                        bf <= 0;
-                        bf_run <= 1;
-                        fv <= 0;
-                    end else begin
-                        k <= k + 1'b1;
-                        pc <= 0;
-                    end
+                if (mv[5] && mk[5] == 12'd1024) begin
+                    // last pair written: keep the slot history scalars, inverse transform
+                    h_valid[js] <= 1;
+                    h_pos[js] <= pos;
+                    h_err[js] <= err;
+                    h_rev[js] <= rev;
+                    ph <= P_IFFT;
+                    inv <= 1;
+                    st <= 0;
+                    bf <= 0;
+                    bf_run <= 1;
+                    fv <= 0;
                 end
-            endcase
+            end
             // ============================================================ FADE / CLR (restart grain)
             P_FADE: case (pc)
                 0: begin
@@ -1413,73 +1408,77 @@ module pv_unit #(
                     ph <= P_OLA;
                     t13 <= 0;
                     pc <= 0;
+                    ol_odd <= 0;
+                    ov <= 0;
                 end else
                     t13 <= t13 + 1'b1;
             end
             // ============================================================ OLA
-            P_OLA: case (pc)
-                0: begin   // element n of t = t13 - 1024 (t even): read z[n] at rev(n)
-                    begin : ro
-                        reg [11:0] j;
+            // sample s = t + 1024, 2 cycles per sample: even cycles read ring / window,
+            // odd cycles write the sample read two cycles before
+            P_OLA: begin
+                ol_odd <= !ol_odd;
+                ov <= {ov[2:0], 1'b0};
+                for (ii = 1; ii < 4; ii = ii + 1) begin
+                    o_addr[ii] <= o_addr[ii-1];
+                    o_time[ii] <= o_time[ii-1];
+                    o_mk[ii] <= o_mk[ii-1];
+                    o_odd[ii] <= o_odd[ii-1];
+                end
+                if (!ol_odd) begin
+                    if (t13 < 13'd2048) begin : oiss
+                        reg signed [12:0] t, u;
+                        reg [12:0] at;
+                        reg [11:0] wa, j;
                         reg [10:0] la;
-                        j = t13[11:0] - 12'd1024;
+                        t = $signed({1'b0, t13}) - 13'sd1024;
+                        at = t < 0 ? -t : t;
+                        case (jwin)
+                        2'd1: begin u = t;        wa = t < 0 ? 12'd0 : (t < 512 ? 12'd1025 + t : at); end
+                        2'd2: begin u = t + 512;  wa = u < 0 ? 12'd0 : (u < 512 ? 12'd1537 + u : at); end
+                        2'd3: begin u = t + 1024; wa = u < 512 ? 12'd2049 + u : at; end
+                        default: begin u = 0;     wa = at; end
+                        endcase
+                        wr_a <= wa;
+                        rg_a <= {js, jc[11:0] + t[11:0]};
+                        rg_we <= 0;
+                        j = t[11:0];
                         la = rev11(j[11:1]);
-                        b0_ra <= la[10:1];
-                        b1_ra <= la[10:1];
+                        if (!t13[0]) begin
+                            b0_ra <= la[10:1];
+                            b1_ra <= la[10:1];
+                        end
+                        ov[0] <= 1;
+                        o_addr[0] <= jc[11:0] + t[11:0];
+                        o_time[0] <= jc + {{19{t[12]}}, t};
+                        o_mk[0] <= (jwin == 2'd1 && t < 0) || (jwin == 2'd2 && u < 0);
+                        o_odd[0] <= t13[0];
+                        o_la <= la;
+                        t13 <= t13 + 1'b1;
                     end
-                    pc <= 1;
-                end
-                1: pc <= 2;
-                2: begin : lo
-                    reg [11:0] j;
-                    reg [10:0] la;
-                    j = t13[11:0] - 12'd1024;
-                    la = rev11(j[11:1]);
-                    if (par11(la)) begin o_yr <= b1_q[53:27]; o_yi <= b1_q[26:0]; end
-                    else           begin o_yr <= b0_q[53:27]; o_yi <= b0_q[26:0]; end
-                    pc <= 3;
-                    sub <= 0;
-                end
-                3: begin : sm   // sample t (sub 0: even, 1: odd): weight, ring read
-                    reg signed [12:0] t;
-                    reg [12:0] at;
-                    reg signed [12:0] u;
-                    reg [11:0] wa;
-                    t = $signed({1'b0, t13}) - 13'sd1024 + sub;
-                    at = t < 0 ? -t : t;
-                    case (jwin)
-                    2'd1: begin u = t;           wa = t < 0 ? 12'd0 : (t < 512 ? 12'd1025 + t : at); end
-                    2'd2: begin u = t + 512;     wa = u < 0 ? 12'd0 : (u < 512 ? 12'd1537 + u : at); end
-                    2'd3: begin u = t + 1024;    wa = u < 512 ? 12'd2049 + u : at; end
-                    default: begin u = 0;        wa = at; end
-                    endcase
-                    o_wv <= !((jwin == 2'd1 && t < 0) || (jwin == 2'd2 && u < 0));
-                    wr_a <= wa;
-                    rg_a <= {js, jc[11:0] + t[11:0]};
-                    o_time[0] <= jc + {{19{t[12]}}, t};
-                    o_y <= sub ? o_yi : o_yr;
-                    pc <= 4;
-                end
-                4: pc <= 5;
-                5: begin
-                    o_prod <= o_y * $signed({1'b0, wr_d});
-                    o_w <= wr_d;
-                    pc <= 6;
-                end
-                6: begin
-                    rg_we <= o_wv && o_w != 0 && $signed(o_time[0] - now) > 0;
-                    rg_wd <= rg_q + ((o_prod + 45'sd131072) >>> 18);
-                    if (sub == 0) begin
-                        sub <= 1;
-                        pc <= 3;
-                    end else if (t13 == 13'd2046) begin
+                    // capture the sample read two cycles ago (token in stage 1)
+                    if (ov[1]) begin : ocap
+                        reg signed [26:0] y;
+                        if (!o_odd[1]) begin
+                            if (par11(o_la)) begin y = b1_q[53:27]; o_yi <= b1_q[26:0]; end
+                            else              begin y = b0_q[53:27]; o_yi <= b0_q[26:0]; end
+                        end else
+                            y = o_yi;
+                        o_prod <= y * $signed({1'b0, wr_d});
+                        o_rq <= rg_q;
+                        o_wen <= !o_mk[1] && wr_d != 0 && $signed(o_time[1] - now) > 0;
+                    end
+                    o_lap <= o_la;
+                end else begin
+                    if (ov[2]) begin
+                        rg_a <= {js, o_addr[2]};
+                        rg_we <= o_wen;
+                        rg_wd <= o_rq + ((o_prod + 45'sd131072) >>> 18);
+                    end
+                    if (t13 == 13'd2048 && ov[1:0] == 0 && !ov[2])
                         ph <= P_DONE;
-                    end else begin
-                        t13 <= t13 + 2'd2;
-                        pc <= 0;
-                    end
                 end
-            endcase
+            end
             // ============================================================ clear job
             P_CLEAR: begin
                 rg_we <= 1;

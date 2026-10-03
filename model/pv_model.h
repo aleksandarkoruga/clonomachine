@@ -83,6 +83,7 @@ struct PvDebug {
     int16_t phase[PV_BINS], rotF[PV_BINS], rot[PV_BINS];
     int peak[1024], end[1024], P = 0, strongest = 0;
     int16_t delta[1024];
+    int32_t xpr[PV_BINS], xpi[PV_BINS];   // resynthesised (CORDIC rotation) bins
     int32_t zr[PV_M], zi[PV_M];           // merged spectrum (natural order)
     int32_t ifftR[PV_M], ifftI[PV_M];     // after the inverse FFT (bit-reversed order)
     int64_t hopIdeal = 0, err = 0, pos = 0;

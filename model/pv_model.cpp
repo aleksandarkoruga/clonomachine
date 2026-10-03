@@ -373,6 +373,8 @@ void PvCore::run(const PvJob& job, PvSlotState& st, const std::vector<int16_t>& 
     st.pHop = hop;
 
     if (dbg) {
+        std::copy(xr, xr + PV_BINS, dbg->xpr);
+        std::copy(xi, xi + PV_BINS, dbg->xpi);
         std::copy(zr, zr + PV_M, dbg->zr);
         std::copy(zi, zi + PV_M, dbg->zi);
     }
