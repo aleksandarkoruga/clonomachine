@@ -50,19 +50,27 @@ leaves the chip in bit-bang mode. Only one program can hold the board at a time
 ## SD card
 
 FAT32 or exFAT, MBR or GPT. Folders are libraries: `/drums` → slot 0, `/melody` → slot 1
-(`/bass`, `/kick` indexed for later). WAV PCM 8/16/24/32-bit, mono/stereo, any rate.
+(`/bass`, `/kick` indexed for later). WAV PCM 8/16/24/32-bit or float 32/64-bit, 1–8
+channels (mixed to mono), any rate.
 
 - **Banks:** every subfolder is a bank; loose files are packed in name order into banks of
   ≤ 7 MB / 127 files. A slot's whole bank sits in SDRAM: CC1 / `bufNum` switch instantly
   inside it. Program change / `/slot/n/bank` loads the new bank in the background, the
   requested sample first (~0.1–0.3 s), while the old bank keeps playing; the next bank is
   prefetched, so stepping banks upward is usually instant. Loading ~2 MB/s.
+- **Long files are split:** a WAV longer than 60 s (or larger than a bank) becomes 4-bar
+  parts (16 beats at the tempo in the name, `..._128bpm.wav`, else 120 BPM = 8 s), each a
+  sample of its own (`list` shows `name.wav#k`). The parts of a file fill banks of their own
+  (`list 1`: `0014 38-Audio #0-9`, `#10-19`, ...): program change steps through the file,
+  CC1 picks the part. A remainder of at least ¼ part becomes a last part ending at the
+  file end. Constants in `fw/wavutil.h`; `host/test_wavutil.cpp` checks the conversion.
 - **Index:** `<dir>/.smpidx` caches format, length, BPM, peak per WAV (name + size + date);
   only new or changed files are parsed (731 files index in ~1.2 s).
 - **Seamless switching:** every grain keeps reading the buffer it started in, the playhead
   moves to the same sixteenth of the bar in the new loop: switches crossfade, no gap.
-- **Transients:** `<dir>/.smptr` caches up to 32 onsets per WAV, found when a sample is
-  first loaded (`list` shows the count); used by `noteMode` 1/2.
+- **Transients:** `<dir>/.smptr` caches up to 32 onsets per sample, found when a sample is
+  first loaded (`list` shows the count, the boot line how many are analysed so far); used
+  by `noteMode` 1/2.
 
 ## Behaviour notes (design decisions)
 

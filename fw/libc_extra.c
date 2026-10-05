@@ -13,6 +13,16 @@ int memcmp(const void* a, const void* b, size_t n) {
     return 0;
 }
 
+char* strrchr(const char* s, int c) {
+    const char* r = NULL;
+    for (;; ++s) {
+        if (*s == (char)c)
+            r = s;
+        if (!*s)
+            return (char*)r;
+    }
+}
+
 int atoi(const char* s) {
     while (*s == ' ')
         ++s;

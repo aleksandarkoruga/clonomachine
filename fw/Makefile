@@ -5,7 +5,7 @@ BUILD_DIR ?= ../build/ulx3s_sampler
 include $(BUILD_DIR)/software/include/generated/variables.mak
 include $(SOC_DIRECTORY)/software/common.mak
 
-OBJECTS = crt0.o main.o uart.o libc_extra.o samples.o transients.o slot.o mapping.o slip.o ff.o ffunicode.o
+OBJECTS = crt0.o main.o uart.o libc_extra.o samples.o transients.o wavutil.o slot.o mapping.o slip.o ff.o ffunicode.o
 # LiteX's read-only libfatfs is replaced by fatfs/
 FW_LIBS = $(filter-out libfatfs,$(LIBS))
 CFLAGS += -I$(CURDIR) -Wno-missing-prototypes
@@ -23,7 +23,7 @@ sampler.elf: $(OBJECTS) linker.ld
 		-Wl,--gc-sections -Wl,-Map,$@.map
 
 # hot loader / format conversion code: speed over size
-samples.o transients.o: CFLAGS += -O2
+samples.o transients.o wavutil.o: CFLAGS += -O2
 
 -include $(OBJECTS:.o=.d)
 

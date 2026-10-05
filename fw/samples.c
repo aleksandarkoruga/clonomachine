@@ -2,12 +2,14 @@
  *
  * SDRAM buffer layout (16-bit words, 64-word aligned, include/sampler_regs.h):
  *   [64 pre-pad][frames][128 post-pad]; a bank is one contiguous region of buffers.
- * Accepted: RIFF/WAVE PCM 8/16/24/32-bit, mono or stereo (downmixed), any sample rate
- * (compensated in PHASOR_INC/PITCH; 48 kHz mono 16-bit is the native format).
+ * Accepted: RIFF/WAVE PCM 8/16/24/32-bit and IEEE float 32/64-bit, 1..8 channels (downmixed),
+ * any sample rate (compensated in PHASOR_INC/PITCH; 48 kHz mono 16-bit is the native format).
  */
 #include "samples.h"
 #include "transients.h"
+#include "wavutil.h"
 
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -207,22 +209,77 @@ static void finish_buffer(volatile int16_t* d, struct sample* s, int normalized)
 #endif
 }
 
-/* Groups samples [0,n) of a library into banks: subfolders, then size/count packing. */
+/* Largest sample a bank holds. */
+#define SAMPLE_MAX_FRAMES (BANK_MAX_BYTES / 2 - SMP_PREPAD - SMP_POSTPAD - 64)
+
+/* Replaces every long file (wavutil.h) by its parts. The file list is moved to the top of
+   the store and expanded downwards; a file never gets more parts than leave one entry
+   for each file after it (MAX_PER_LIB). */
+static void split_long(struct lib* L) {
+    const int n = L->count, top = MAX_PER_LIB - n;
+    memmove(&L->s[top], &L->s[0], (size_t)n * sizeof(struct sample));
+    int out = 0;
+    for (int i = 0; i < n; ++i) {
+        const struct sample f = L->s[top + i];
+        const uint32_t len = wav_split_len(f.frames, f.sr, f.name, SAMPLE_MAX_FRAMES);
+        uint32_t parts = len ? wav_split_count(f.frames, len) : 1;
+        const uint32_t room = (uint32_t)(top + i + 1 - out);
+        if (parts > room)
+            parts = room;
+        if (parts > 0xFFFF)
+            parts = 0xFFFF;
+        const uint32_t fb = f.ch * (f.bits / 8u);
+        for (uint32_t k = 0; k < parts; ++k) {
+            struct sample* s = &L->s[out++];
+            *s = f;
+            if (!len)
+                continue;
+            const uint32_t start = wav_split_start(f.frames, len, k);
+            s->data_off = f.data_off + start * fb;
+            s->data_len = len * fb;
+            s->frames = len;
+            s->seg = (uint16_t)k;
+            s->nseg = (uint16_t)parts;
+            s->peak = 0; /* per part, cached in .smptr */
+            s->bpm_q16 = samples_track_bpm_q16(len, s->sr, &s->beats_log2);
+        }
+    }
+    L->count = out;
+}
+
+static const char* base_name(const char* p) {
+    const char* sl = strrchr(p, '/');
+    return sl ? sl + 1 : p;
+}
+
+/* Groups samples [0,n) of a library into banks: subfolders, then size/count packing; the
+   parts of a split file fill banks of their own ("name #first-last"). */
 static void build_banks(struct lib* L) {
     L->nbanks = 0;
     const uint32_t max_words = BANK_MAX_BYTES / 2;
     char cur[SAMPLE_NAME_LEN] = "";
     struct bank* b = 0;
+    uint32_t cap = BANK_MAX_FILES; /* split file: parts per bank, the same in all its banks */
     for (int i = 0; i < L->count; ++i) {
         struct sample* s = &L->s[i];
         char grp[SAMPLE_NAME_LEN] = "";
         const char* sl = strchr(s->name, '/');
-        if (sl) {
+        if (s->nseg > 1)
+            strcpy(grp, s->name);
+        else if (sl) {
             memcpy(grp, s->name, (size_t)(sl - s->name));
             grp[sl - s->name] = 0;
         }
         const uint32_t fp = footprint(s->frames);
-        if (!b || strcmp(grp, cur) || b->count >= BANK_MAX_FILES || (b->words && b->words + fp > max_words)) {
+        if (s->nseg > 1 && s->seg == 0) {
+            uint32_t fit = max_words / fp;
+            if (fit > BANK_MAX_FILES)
+                fit = BANK_MAX_FILES;
+            const uint32_t nb = (s->nseg + fit - 1) / fit;
+            cap = (s->nseg + nb - 1) / nb;
+        } else if (s->nseg <= 1)
+            cap = BANK_MAX_FILES;
+        if (!b || strcmp(grp, cur) || (uint32_t)b->count >= cap || (b->words && b->words + fp > max_words)) {
             if (L->nbanks == MAX_BANKS_PER_LIB) {
                 L->count = i; /* out of bank slots: ignore the rest */
                 break;
@@ -233,10 +290,22 @@ static void build_banks(struct lib* L) {
             b->base = NOT_RESIDENT;
             b->want = -1;
             strcpy(cur, grp);
-            if (grp[0])
+            if (s->nseg <= 1 && grp[0])
                 snprintf(b->name, sizeof(b->name), "%s", grp);
-            else
+            else if (s->nseg <= 1)
                 snprintf(b->name, sizeof(b->name), "%d", L->nbanks - 1);
+        }
+        if (s->nseg > 1) { /* "<stem, 13 chars> #first-last" */
+            const char* bn = base_name(s->name);
+            const char* dot = strrchr(bn, '.');
+            size_t stem = dot ? (size_t)(dot - bn) : strlen(bn);
+            if (stem > 13)
+                stem = 13;
+            memcpy(b->name, bn, stem);
+            if (s->seg == L->s[b->first].seg)
+                snprintf(b->name + stem, sizeof(b->name) - stem, " #%u", s->seg);
+            else
+                snprintf(b->name + stem, sizeof(b->name) - stem, " #%u-%u", L->s[b->first].seg, s->seg);
         }
         s->offset = b->words;
         s->ready = 0;
@@ -303,15 +372,16 @@ static uint16_t rd16(const uint8_t* p) { return (uint16_t)(p[0] | (p[1] << 8)); 
 
 /* ---- per-folder index file -------------------------------------------------------- */
 #define IDX_MAGIC 0x58444953u /* 'SIDX' */
-#define IDX_VERSION 1
+#define IDX_VERSION 2         /* 2: + fmt; version 1 files (PCM only) are still read */
 struct idx_hdr { uint32_t magic, version, count, rec_size; };
-struct idx_rec {
+struct idx_rec {              /* one per file (the parts of a split file are derived) */
     char     name[SAMPLE_NAME_LEN];
     uint32_t fsize;
     uint16_t fdate, ftime;
     uint32_t data_off, data_len, sr, frames;
     uint8_t  ch, bits;
-    int16_t  peak;
+    int16_t  peak;            /* 0 for split files: the parts' peaks are in .smptr */
+    uint8_t  fmt, pad[3];     /* 0 (version 1): PCM */
 };
 static struct idx_rec g_idx[MAX_PER_LIB];
 static int g_idx_dirty[MAX_LIBS];
@@ -328,9 +398,16 @@ static int idx_load(int lib) {
         return 0;
     int cnt = 0;
     if (f_read(&f, &h, sizeof(h), &n) == FR_OK && n == sizeof(h) && h.magic == IDX_MAGIC
-        && h.version == IDX_VERSION && h.rec_size == sizeof(struct idx_rec) && h.count <= MAX_PER_LIB) {
-        if (f_read(&f, g_idx, h.count * sizeof(struct idx_rec), &n) == FR_OK && n == h.count * sizeof(struct idx_rec))
+        && (h.version == 1 || h.version == IDX_VERSION) && h.rec_size >= offsetof(struct idx_rec, fmt) && h.rec_size <= sizeof(struct idx_rec)
+        && h.count <= MAX_PER_LIB) {
+        if (f_read(&f, g_idx, h.count * h.rec_size, &n) == FR_OK && n == h.count * h.rec_size) {
             cnt = (int)h.count;
+            /* older, shorter records: spread out from the end, zero the new fields */
+            for (int i = cnt - 1; h.rec_size < sizeof(struct idx_rec) && i >= 0; --i) {
+                memmove(&g_idx[i], (uint8_t*)g_idx + (uint32_t)i * h.rec_size, h.rec_size);
+                memset((uint8_t*)&g_idx[i] + h.rec_size, 0, sizeof(struct idx_rec) - h.rec_size);
+            }
+        }
     }
     f_close(&f);
     return cnt;
@@ -344,10 +421,15 @@ static void idx_save(int lib) {
     snprintf(p, sizeof(p), "%s/.smpidx", g_dirs[lib]);
     if (f_open(&f, p, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK)
         return;
-    const struct idx_hdr h = {IDX_MAGIC, IDX_VERSION, (uint32_t)L->count, sizeof(struct idx_rec)};
+    uint32_t files = 0;
+    for (int i = 0; i < L->count; ++i)
+        files += L->s[i].seg == 0;
+    const struct idx_hdr h = {IDX_MAGIC, IDX_VERSION, files, sizeof(struct idx_rec)};
     f_write(&f, &h, sizeof(h), &n);
     for (int i = 0; i < L->count; ++i) {
         const struct sample* s = &L->s[i];
+        if (s->seg) /* a split file is one record, from its first part */
+            continue;
         struct idx_rec r;
         memset(&r, 0, sizeof(r));
         memcpy(r.name, s->name, SAMPLE_NAME_LEN);
@@ -355,12 +437,13 @@ static void idx_save(int lib) {
         r.fdate = s->fdate;
         r.ftime = s->ftime;
         r.data_off = s->data_off;
-        r.data_len = s->data_len;
+        r.data_len = s->file_len;
         r.sr = s->sr;
-        r.frames = s->frames;
+        r.frames = s->file_len / (s->ch * (s->bits / 8u));
         r.ch = s->ch;
         r.bits = s->bits;
-        r.peak = s->peak;
+        r.peak = s->nseg > 1 ? 0 : s->peak;
+        r.fmt = s->fmt;
         f_write(&f, &r, sizeof(r), &n);
     }
     f_close(&f);
@@ -398,8 +481,10 @@ static int parse_wav(int lib, struct sample* s) {
             s->ch = (uint8_t)rd16(b + 2);
             s->sr = rd32(b + 4);
             s->bits = (uint8_t)rd16(b + 14);
-            if (fmt == 0xFFFE && len >= 26)
+            if (fmt == 0xFFFE && len >= 26) /* WAVE_FORMAT_EXTENSIBLE: sub-format GUID */
                 fmt = rd16(b + 24);
+            if (rd16(b + 2) > 255 || rd16(b + 14) > 255)
+                s->ch = 0;
             f_lseek(&f, f_tell(&f) + (len - want) + (len & 1));
         } else if (!memcmp(c, "data", 4)) {
             s->data_off = (uint32_t)f_tell(&f);
@@ -408,14 +493,16 @@ static int parse_wav(int lib, struct sample* s) {
         } else
             f_lseek(&f, f_tell(&f) + len + (len & 1));
     }
-    if (fmt != 1 || (s->ch != 1 && s->ch != 2) || (s->bits != 8 && s->bits != 16 && s->bits != 24 && s->bits != 32)
-        || !s->sr) {
+    if (!wav_supported(fmt, s->ch, s->bits) || !s->sr) {
+        printf("  skip %s (format %u, %u ch, %u bit: not PCM / float)\n", s->name, fmt, s->ch, s->bits);
         rc = -4;
         goto out;
     }
+    s->fmt = (uint8_t)fmt;
     if (s->data_off + s->data_len > s->fsize) /* truncated / streaming writers */
         s->data_len = s->fsize - s->data_off;
     s->frames = s->data_len / (s->ch * (s->bits / 8u));
+    s->file_len = s->frames * (s->ch * (s->bits / 8u));
     rc = s->frames >= 128 ? 0 : -5;
 out:
     f_close(&f);
@@ -478,12 +565,22 @@ static int g_tr_dirty[MAX_LIBS];
 #define TRF_MAGIC 0x4E525453u /* 'STRN' */
 #define TRF_VERSION 1
 struct trf_hdr { uint32_t magic, version, count, rec_size; };
-struct trf_rec { uint32_t fsize; uint16_t fdate, ftime; uint32_t hash; uint8_t n, pad[3]; };
+/* peak: of the 16-bit copy (0 in older files); the only place the peak of a part is kept */
+struct trf_rec { uint32_t fsize; uint16_t fdate, ftime; uint32_t hash; uint8_t n, pad; int16_t peak; };
 
-static uint32_t name_hash(const char* p) {
-    uint32_t h = 2166136261u;
-    while (*p)
-        h = (h ^ (uint8_t)*p++) * 16777619u;
+static uint32_t fnv(uint32_t h, const uint8_t* p, uint32_t n) {
+    while (n--)
+        h = (h ^ *p++) * 16777619u;
+    return h;
+}
+
+/* name hash; a part also hashes its place in the file, so other split settings miss */
+static uint32_t sample_key(const struct sample* s) {
+    uint32_t h = fnv(2166136261u, (const uint8_t*)s->name, (uint32_t)strlen(s->name));
+    if (s->nseg > 1) {
+        const uint32_t w[3] = {s->data_off, s->frames, s->nseg};
+        h = fnv(h, (const uint8_t*)w, sizeof(w));
+    }
     return h;
 }
 
@@ -509,7 +606,7 @@ static void tr_store(struct sample* s, const uint32_t* p, int n) {
 }
 
 static int trf_match(const struct sample* s, const struct trf_rec* r) {
-    return s->fsize == r->fsize && s->fdate == r->fdate && s->ftime == r->ftime && name_hash(s->name) == r->hash;
+    return s->fsize == r->fsize && s->fdate == r->fdate && s->ftime == r->ftime && sample_key(s) == r->hash;
 }
 
 static int trf_load(int lib) {
@@ -521,7 +618,7 @@ static int trf_load(int lib) {
     snprintf(p, sizeof(p), "%s/.smptr", g_dirs[lib]);
     if (f_open(&f, p, FA_READ) != FR_OK)
         return 0;
-    int got = 0;
+    int got = 0, cur = 0;
     if (f_read(&f, &h, sizeof(h), &n) == FR_OK && n == sizeof(h) && h.magic == TRF_MAGIC && h.version == TRF_VERSION
         && h.rec_size == sizeof(struct trf_rec)) {
         for (uint32_t i = 0; i < h.count; ++i) {
@@ -531,13 +628,19 @@ static int trf_load(int lib) {
                 break;
             if (r.n && (f_read(&f, pos, r.n * 4u, &n) != FR_OK || n != r.n * 4u))
                 break;
-            /* records are written in library order: try the same index first */
-            struct sample* s = (i < (uint32_t)L->count && trf_match(&L->s[i], &r)) ? &L->s[i] : 0;
-            for (int k = 0; !s && k < L->count; ++k)
-                if (trf_match(&L->s[k], &r))
-                    s = &L->s[k];
+            /* records are written in library order: search on from the last match */
+            struct sample* s = 0;
+            for (int k = 0; !s && k < L->count; ++k) {
+                const int j = (cur + k) % L->count;
+                if (trf_match(&L->s[j], &r)) {
+                    s = &L->s[j];
+                    cur = j + 1;
+                }
+            }
             if (s && s->ntr == TR_NONE) {
                 tr_store(s, pos, r.n);
+                if (!s->peak)
+                    s->peak = r.peak;
                 ++got;
             }
         }
@@ -568,8 +671,9 @@ static void trf_save(int lib) {
         r.fsize = s->fsize;
         r.fdate = s->fdate;
         r.ftime = s->ftime;
-        r.hash = name_hash(s->name);
+        r.hash = sample_key(s);
         r.n = s->ntr;
+        r.peak = s->peak;
         f_write(&f, &r, sizeof(r), &n);
         if (s->ntr)
             f_write(&f, &g_tr_pool[s->tr], s->ntr * 4u, &n);
@@ -617,16 +721,21 @@ static int index_lib(int l) {
             s->ch = r->ch;
             s->bits = r->bits;
             s->peak = r->peak;
+            s->fmt = r->fmt ? r->fmt : WAV_PCM;
             ++cached;
         } else {
             const int rc = parse_wav(l, s);
             ++parsed;
             if (rc) {
-                printf("  skip %s (%d)\n", s->name, rc);
+                if (rc != -4)
+                    printf("  skip %s (%s)\n", s->name, rc == -1 ? "cannot open" : rc == -5 ? "too short" : "not a WAV");
                 continue;
             }
             g_idx_dirty[l] = 1;
         }
+        s->file_len = s->data_len;
+        s->seg = 0;
+        s->nseg = 1;
         s->bpm_q16 = samples_track_bpm_q16(s->frames, s->sr, &s->beats_log2);
         L->s[out++] = *s;
     }
@@ -635,10 +744,14 @@ static int index_lib(int l) {
     L->count = out;
     if (g_idx_dirty[l])
         idx_save(l);
+    split_long(L);
     build_banks(L);
     const int ntr = trf_load(l);
-    printf("SD: %-8s %4d WAVs in %3d banks (%d from index, %d parsed, %d with transients)\n", g_dirs[l], L->count,
-           L->nbanks, cached, parsed, ntr);
+    int split = 0;
+    for (int i = 0; i < L->count; ++i)
+        split += L->s[i].nseg > 1 && L->s[i].seg == 0;
+    printf("SD: %-8s %4d WAVs, %4d samples in %3d banks (%d from index, %d parsed, %d split; %d analysed)\n",
+           g_dirs[l], out, L->count, L->nbanks, cached, parsed, split, ntr);
     return L->count;
 }
 
@@ -677,6 +790,11 @@ void samples_want(int lib, int bank, int idx, int prio) {
         b->want = (int16_t)idx;
     if (b->state == BANK_RESIDENT)
         return;
+    if (b->blocked) { /* the pool had no room: retry later, don't stall the loader */
+        if ((int32_t)(now_samples() - b->retry_at) < 0)
+            return;
+        b->blocked = 0;
+    }
     for (int i = 0; i < g_nreq; ++i)
         if (g_req[i].lib == lib && g_req[i].bank == bank) {
             struct req r = g_req[i];
@@ -740,9 +858,12 @@ static int job_start(void) {
             if (at == NOT_RESIDENT) {
                 static const struct bank* last_msg;
                 if (eff_prio(&r) && last_msg != b) {
-                    printf("SD: no room for bank %s/%s\n", L->dir, b->name);
+                    printf("SD: no room for bank %s/%s (%lu KB), retrying\n", L->dir, b->name,
+                           (unsigned long)(b->words / 512));
                     last_msg = b;
                 }
+                b->blocked = 1;
+                b->retry_at = now_samples() + 48000;
                 drop_req(k);
                 continue;
             }
@@ -803,48 +924,11 @@ static int job_chunk(void) {
     idle_hook();
     want = n / fb;
     int16_t* d = (int16_t*)(g_mem + b->base + s->offset + SMP_PREPAD + g_job.done); /* flushed at finish */
-    const int32_t g = (int32_t)g_job.gain;
-#define SAT16(v) ((int16_t)((v) > 32767 ? 32767 : (v) < -32768 ? -32768 : (v)))
     for (uint32_t i0 = 0; i0 < want; i0 += 4096) { /* 4096-frame slices, hook in between */
         const uint32_t i1 = (want - i0 > 4096) ? i0 + 4096 : want;
-        if (s->ch == 1 && bps == 2 && g == 65536) {
-            const int16_t* src = (const int16_t*)g_io;   /* little-endian int16 */
-            memcpy(d + i0, src + i0, (i1 - i0) * 2);
-        } else if (s->ch == 1 && bps == 2) {
-            const int16_t* src = (const int16_t*)g_io;
-            for (uint32_t i = i0; i < i1; ++i) {
-                const int32_t v = (src[i] * g) >> 16;
-                d[i] = SAT16(v);
-            }
-        } else if (s->ch == 2 && bps == 2) {
-            const uint32_t* src = (const uint32_t*)g_io;  /* L | R << 16 */
-            for (uint32_t i = i0; i < i1; ++i) {
-                const uint32_t w = src[i];
-                const int32_t m = ((int32_t)(int16_t)w + (int32_t)(int16_t)(w >> 16)) >> 1;
-                const int32_t v = (m * g) >> 16;
-                d[i] = SAT16(v);
-            }
-        } else {
-            const uint8_t* p = g_io + i0 * fb;
-            for (uint32_t i = i0; i < i1; ++i) {
-                int32_t acc = 0;
-                for (uint32_t c = 0; c < s->ch; ++c, p += bps) {
-                    switch (bps) {
-                    case 1: acc += ((int32_t)p[0] - 128) << 8; break;
-                    case 2: acc += (int16_t)rd16(p); break;
-                    case 3: acc += (int16_t)rd16(p + 1); break;
-                    default: acc += (int16_t)rd16(p + 2); break;
-                    }
-                }
-                if (s->ch == 2)
-                    acc >>= 1;
-                const int32_t v = (acc * g) >> 16;
-                d[i] = SAT16(v);
-            }
-        }
+        wav_convert(d + i0, g_io + i0 * fb, i1 - i0, s->fmt, s->ch, s->bits, (int32_t)g_job.gain);
         idle_hook();
     }
-#undef SAT16
     g_job.done += want;
     g_load_bytes += n;
     return want == 0 || g_job.done >= s->frames;
@@ -955,6 +1039,13 @@ int samples_init(void) {
         g_job.active = 0;
         g_job_bank = 0;
     }
+    for (int l = 0; g_card_ok && l < MAX_LIBS; ++l) { /* rescan: keep what was measured */
+        if (g_idx_dirty[l])
+            idx_save(l);
+        if (g_tr_dirty[l])
+            trf_save(l);
+    }
+    g_tr_used = 0;
     g_nreq = 0;
     memset(g_libs, 0, sizeof(g_libs));
     for (int l = 0; l < MAX_LIBS; ++l) {
@@ -1069,8 +1160,13 @@ void samples_list(int lib, int bank) {
         for (int i = 0; i < b->count; ++i) {
             const struct sample* s = &L->s[b->first + i];
             const uint32_t ms = (uint32_t)((uint64_t)s->frames * 1000 / s->sr);
-            printf("  %3d %c %-40s %6lu ms %5lu Hz %uch %2ub  %3lu.%02lu bpm  2^%ld beats", i, s->ready ? '*' : ' ',
-                   s->name, (unsigned long)ms, (unsigned long)s->sr, s->ch, s->bits,
+            char nm[SAMPLE_NAME_LEN + 8];
+            if (s->nseg > 1)
+                snprintf(nm, sizeof(nm), "%s#%u", s->name, s->seg);
+            else
+                snprintf(nm, sizeof(nm), "%s", s->name);
+            printf("  %3d %c %-40s %6lu ms %5lu Hz %uch %2ub%s  %3lu.%02lu bpm  2^%ld beats", i, s->ready ? '*' : ' ',
+                   nm, (unsigned long)ms, (unsigned long)s->sr, s->ch, s->bits, s->fmt == WAV_FLOAT ? "f" : "",
                    (unsigned long)(s->bpm_q16 >> 16), (unsigned long)(((s->bpm_q16 & 0xFFFF) * 100) >> 16),
                    (long)s->beats_log2);
             if (s->ntr == TR_NONE)
