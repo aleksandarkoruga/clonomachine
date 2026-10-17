@@ -370,10 +370,9 @@ void slot_note_on(int s, int note, int vel) {
     slot_trig(s);
 }
 
-void slot_note_off(int s) {
-    if (g_slots[s].env_hold)
-        eng_slot_write(s, SMP_R_STROBE, SMP_STROBE_GATE_OFF);
-}
+/* Note-off ends the gate (1 ms ramp): the gate length / envHold is the longest a note
+   plays, the note's own length can cut it shorter. */
+void slot_note_off(int s) { eng_slot_write(s, SMP_R_STROBE, SMP_STROBE_GATE_OFF); }
 
 void set_global_bpm(uint32_t bpm_milli) {
     if (bpm_milli < 20000)

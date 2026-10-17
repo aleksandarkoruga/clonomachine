@@ -84,7 +84,8 @@ channels (mixed to mono), any rate.
 - `/slot/n/noteMode`: 0 note → equal 16ths (as SC), 1 note k → k-th transient, 2 16ths
   snapped to the nearest transient.
 - Gate: `(CC10+1)/32` bar in real time (`240/bpm` s per bar, measured engine rate),
-  identical for every loop at a given bpm.
+  identical for every loop at a given bpm. A note-off ends the gate early (1 ms ramp), so
+  the gate length is the longest a note plays; `envHold 1` keeps it open until the note-off.
 - Stutter: TRIG latches POS; `REPEATS` retrigger pulses every `INTERVAL` samples
   re-latch the playhead (no record buffer).
 - Engine rate 48014.3 Hz (PLL 49.1667 MHz); tempo and pitch are compensated.

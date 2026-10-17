@@ -57,7 +57,7 @@ void slot_apply_algo(int s);
 void slot_set_pos(int s, int32_t pos_q30); /* UGen pos: >= 0 pins, < 0 runs free */
 void slot_trig(int s);                 /* POS + stutter params + TRIG strobe */
 void slot_note_on(int s, int note, int vel);
-void slot_note_off(int s);
+void slot_note_off(int s);             /* ends the gate */
 void set_global_bpm(uint32_t bpm_milli);
 
 uint32_t slot_tempo_ratio_q24(int s);
