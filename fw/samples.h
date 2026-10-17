@@ -25,7 +25,7 @@
 #define MAX_PER_LIB       1024
 #define MAX_BANKS_PER_LIB 160
 #define BANK_MAX_FILES    127
-#define BANK_MAX_BYTES    (7u << 20)   /* 2 slots x (playing + loading) banks fit the 30 MB pool */
+#define BANK_MAX_BYTES    (7u << 20)   /* one bank per pool region: 4 x 7.5 MB in the 30 MB pool */
 #define SAMPLE_NAME_LEN   80
 #define NOT_RESIDENT      0xFFFFFFFFu
 

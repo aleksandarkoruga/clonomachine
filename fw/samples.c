@@ -98,34 +98,32 @@ void samples_hold(int lib, int bank, uint32_t ms) {
         b->hold_until = now_samples() + ms * 48;
 }
 
-/* ---- pool allocator: contiguous bank regions, first fit, LRU eviction ----------------- */
-struct blk { uint32_t base, len; };
-static struct blk g_blk[MAX_LIBS * MAX_BANKS_PER_LIB];
+/* ---- pool allocator: one bank per region, LRU eviction ----------------------------------
+ * The pool is cut into equal regions that each hold the largest bank (BANK_MAX_BYTES):
+ * 4 x 7.5 MB in the 30 MB pool. Any free region fits any bank, so free space can't
+ * fragment. (First fit at any address left gaps just under a bank between two playing
+ * banks: a 7.1 MB bank then found no room until one of them was replaced.) */
 static struct bank* g_job_bank;
 
+static uint32_t region_words(void) {
+    const uint32_t pool = pool_end_words() - POOL_START_WORDS;
+    const uint32_t n = pool / (BANK_MAX_BYTES / 2);
+    return n ? (pool / n) & ~63u : pool;
+}
+
 static uint32_t find_gap(uint32_t need) {
-    int n = 0;
-    for (int l = 0; l < MAX_LIBS; ++l)
-        for (int i = 0; i < g_libs[l].nbanks; ++i) {
-            const struct bank* b = &g_libs[l].b[i];
-            if (b->base != NOT_RESIDENT)
-                g_blk[n++] = (struct blk){b->base, b->words};
-        }
-    for (int gap = n / 2; gap > 0; gap /= 2) /* shell sort by base */
-        for (int i = gap; i < n; ++i)
-            for (int j = i; j >= gap && g_blk[j - gap].base > g_blk[j].base; j -= gap) {
-                const struct blk t = g_blk[j];
-                g_blk[j] = g_blk[j - gap];
-                g_blk[j - gap] = t;
-            }
-    uint32_t at = POOL_START_WORDS;
-    for (int i = 0; i < n; ++i) {
-        if (g_blk[i].base >= at + need)
+    const uint32_t rw = region_words();
+    if (need > rw)
+        return NOT_RESIDENT;
+    for (uint32_t at = POOL_START_WORDS; at + rw <= pool_end_words(); at += rw) {
+        int used = 0;
+        for (int l = 0; l < MAX_LIBS && !used; ++l)
+            for (int i = 0; i < g_libs[l].nbanks && !used; ++i)
+                used = g_libs[l].b[i].base == at;
+        if (!used)
             return at;
-        if (g_blk[i].base + g_blk[i].len > at)
-            at = g_blk[i].base + g_blk[i].len;
     }
-    return (at + need <= pool_end_words()) ? at : NOT_RESIDENT;
+    return NOT_RESIDENT;
 }
 
 static void bank_evict(int lib, struct bank* b) {
@@ -164,7 +162,7 @@ static int evict_one(int max_keep, int ignore_hold) {
 
 /* max_keep: 0 = free space only, 1 = may evict unneeded banks, 2 = also prefetches. */
 static uint32_t pool_alloc(uint32_t words, int max_keep) {
-    if (words > pool_end_words() - POOL_START_WORDS)
+    if (words > region_words())
         return NOT_RESIDENT;
     for (;;) {
         const uint32_t at = find_gap(words);
@@ -795,6 +793,13 @@ void samples_want(int lib, int bank, int idx, int prio) {
             return;
         b->blocked = 0;
     }
+    /* requests for banks no slot plays, wants or prefetches any more (a bank knob swept
+       past them) go first: they used to fill the queue, and new requests were dropped */
+    for (int i = 0; i < g_nreq;)
+        if (!samples_bank_keep(g_req[i].lib, g_req[i].bank))
+            drop_req(i);
+        else
+            ++i;
     for (int i = 0; i < g_nreq; ++i)
         if (g_req[i].lib == lib && g_req[i].bank == bank) {
             struct req r = g_req[i];
@@ -820,8 +825,15 @@ void samples_want(int lib, int bank, int idx, int prio) {
     g_req[g_nreq++] = (struct req){(int8_t)lib, (int8_t)prio, (int16_t)bank};
 }
 
-/* A request only stays urgent while a slot plays or waits for that bank. */
-static int eff_prio(const struct req* r) { return samples_bank_keep(r->lib, r->bank) == 2; }
+/* 2: a slot waits for this bank's wanted sample, 1: the rest of a bank a slot plays or
+   wants, 0: prefetch. A request only stays urgent while a slot plays or waits for the bank;
+   a waiting slot goes before another slot's bank filling up in the background. */
+static int eff_prio(const struct req* r) {
+    if (samples_bank_keep(r->lib, r->bank) != 2)
+        return 0;
+    const struct bank* b = samples_bank(r->lib, r->bank);
+    return (b && b->want >= 0 && b->want < b->count && !g_libs[(int)r->lib].s[b->first + b->want].ready) ? 2 : 1;
+}
 
 /* Newest request with the highest effective priority (latest intent wins). */
 static int pick_req(void) {
@@ -966,18 +978,18 @@ static void job_finish(void) {
 int samples_poll(void) {
     if (!g_card_ok)
         return 0;
-    if (g_job.active && !g_job.prio) {
-        /* a slot waits for a sample that is not this one: drop this background file
-           (it is reloaded later from the start) */
+    if (g_job.active) {
+        /* a slot waits for a sample that is not this one: drop this file if it is background
+           fill, or the wanted sample of a bank no slot wants any more (knob sweeps); it is
+           reloaded later from the start */
         const int k = pick_req();
-        if (k >= 0 && eff_prio(&g_req[k])) {
-            const struct bank* wb = samples_bank(g_req[k].lib, g_req[k].bank);
-            if (wb && wb->want >= 0 && !g_libs[(int)g_req[k].lib].s[wb->first + wb->want].ready
-                && !(g_req[k].lib == g_job.lib && g_req[k].bank == g_job.bank && wb->want == g_job.idx)) {
-                f_close(&g_job.f);
-                g_job.active = 0;
-                g_job_bank = 0;
-            }
+        if (k >= 0 && eff_prio(&g_req[k]) == 2
+            && !(g_req[k].lib == g_job.lib && g_req[k].bank == g_job.bank
+                 && samples_bank(g_job.lib, g_job.bank)->want == g_job.idx)
+            && (!g_job.prio || samples_bank_keep(g_job.lib, g_job.bank) != 2)) {
+            f_close(&g_job.f);
+            g_job.active = 0;
+            g_job_bank = 0;
         }
     }
     if (!g_job.active) {
@@ -1185,8 +1197,9 @@ void samples_stats(void) {
                 used += g_libs[l].b[i].words;
                 ++n;
             }
-    printf("pool: %lu banks, %lu / %lu KB; loads %lu, %lu KB in %lu ms (%lu KB/s)\n", (unsigned long)n,
-           (unsigned long)(used / 512), (unsigned long)((pool_end_words() - POOL_START_WORDS) / 512),
+    printf("pool: %lu of %lu regions (%lu KB each), %lu KB used; loads %lu, %lu KB in %lu ms (%lu KB/s)\n",
+           (unsigned long)n, (unsigned long)((pool_end_words() - POOL_START_WORDS) / region_words()),
+           (unsigned long)(region_words() / 512), (unsigned long)(used / 512),
            (unsigned long)g_load_count, (unsigned long)(g_load_bytes / 1024), (unsigned long)g_load_ms,
            (unsigned long)(g_load_ms ? g_load_bytes / g_load_ms : 0));
 }
