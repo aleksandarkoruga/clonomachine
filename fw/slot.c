@@ -114,6 +114,7 @@ void slots_init(void) {
         sl->tempo_lock = 1;
         sl->algo = 0;
         sl->pv_transient = 1;
+        sl->out = s == 0 ? 0 : 1;       /* drums left, every other voice right */
         sl->max_grains = 32;
         /* initial BufGrainPlay values: a smooth time-stretch; any other texture is just
            other values of the same parameters */
@@ -187,6 +188,7 @@ void slot_apply_output(int s) {
     const struct slot* sl = &g_slots[s];
     eng_slot_write(s, SMP_R_AMP, (uint32_t)clampi(sl->amp_q16 >> 4, 0, 65535));
     eng_slot_write(s, SMP_R_ALGO_AMP, (uint32_t)clampi(sl->algo_q16 >> 1, 0, 32768));
+    eng_slot_write(s, SMP_R_OUT, sl->out == 0 ? 1u : sl->out == 1 ? 2u : 3u);
 }
 
 void slot_apply_tempo(int s) {

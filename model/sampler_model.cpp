@@ -47,6 +47,7 @@ void Slot::reset(int idx) {
     r[SMP_R_INTERVAL] = 4800;
     r[SMP_R_AMP] = 4096;
     r[SMP_R_ALGO_AMP] = 32768;
+    r[SMP_R_OUT] = 3;
     rng = 0x9E3779B9u + static_cast<uint32_t>(idx);
 }
 
@@ -412,14 +413,19 @@ int32_t Engine::mixSlot(int s) {
 }
 
 int32_t Engine::step() {
-    int64_t sum = 0;
+    int64_t sumL = 0, sumR = 0;
     for (int s = 0; s < nSlots; ++s) {
         slots[s].step(mem, tab);
-        sum += mixSlot(s);
+        const int32_t o = mixSlot(s);
+        if (slots[s].r[SMP_R_OUT] & 1)
+            sumL += o;
+        if (slots[s].r[SMP_R_OUT] & 2)
+            sumR += o;
     }
     beat += beatInc;
     ++samples;
-    return sat((sum * master) >> 12, 24);
+    outR = sat((sumR * master) >> 12, 24);
+    return sat((sumL * master) >> 12, 24);
 }
 
 } // namespace smp

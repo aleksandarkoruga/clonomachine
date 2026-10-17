@@ -29,6 +29,7 @@ struct slot {
     int algo;                /* 0 grains, 1 phase vocoder (switches live, crossfaded)    */
     int pv_transient;        /* phase vocoder transient handling on                     */
     int note_mode;           /* note -> pos: 0 equal 16ths, 1 k-th transient, 2 16ths snapped to transients */
+    int out;                 /* output: 0 left, 1 right, 2 both                          */
     uint32_t seed;
     /* drum voice gate / stutter / output */
     int env_abs;             /* 0: env_bars at the global tempo, 1: env_sec             */

@@ -125,12 +125,13 @@ static int runScenario(const Scenario& sc, const char* romDir) {
         if (fillTaken && ++wordIdx == 64) { wordIdx = 0; reqq.pop_front(); serveAt = -1; }
 
         if (top->out_stb) {
-            const int32_t rtl = static_cast<int32_t>(top->out_sample << 8) >> 8;
+            const int32_t rtl = static_cast<int32_t>(top->out_l << 8) >> 8;
+            const int32_t rtlR = static_cast<int32_t>(top->out_r << 8) >> 8;
             const int32_t ref = model.step();
-            if (rtl != ref) {
+            if (rtl != ref || rtlR != model.outR) {
                 if (firstBad < 0) firstBad = n;
                 if (mism < 5)
-                    std::printf("  [%s] sample %d: rtl %d model %d\n", sc.name, n, rtl, ref);
+                    std::printf("  [%s] sample %d: rtl %d / %d model %d / %d\n", sc.name, n, rtl, rtlR, ref, model.outR);
                 ++mism;
             }
             errE += double(rtl - ref) * double(rtl - ref);
@@ -285,6 +286,26 @@ int main(int argc, char** argv) {
         }
     }});
 
+    scs.push_back({"stereo_routing", 30000, 40, true, [](int n, std::vector<Write>& w) {
+        // OUT bits: slot 0 left, slot 1 (phase vocoder) right, then both, then swapped / muted
+        if (n == 0) {
+            slotSetup(w, 0, gBufA, 0.04, 4, 1.0, 1.0);
+            w.push_back({SMP_ADDR(0, SMP_R_OUT), 1});
+            w.push_back({SMP_ADDR(0, SMP_R_CTRL), SMP_CTRL_ENABLE | SMP_CTRL_ENV_HOLD});
+            w.push_back({SMP_ADDR(0, SMP_R_STROBE), SMP_STROBE_TRIG});
+            slotSetup(w, 1, gBufB, 0.03, 3, 0.8, 1.2);
+            w.push_back({SMP_ADDR(1, SMP_R_ALGO), 1});
+            w.push_back({SMP_ADDR(1, SMP_R_OUT), 2});
+            w.push_back({SMP_ADDR(1, SMP_R_CTRL), SMP_CTRL_ENABLE | SMP_CTRL_ENV_HOLD});
+            w.push_back({SMP_ADDR(1, SMP_R_STROBE), SMP_STROBE_TRIG});
+        }
+        if (n == 10000)
+            w.push_back({SMP_ADDR(1, SMP_R_OUT), 3});
+        if (n == 20000) {
+            w.push_back({SMP_ADDR(0, SMP_R_OUT), 2});
+            w.push_back({SMP_ADDR(1, SMP_R_OUT), 0});
+        }
+    }});
     scs.push_back({"bg_advance", 40000, 40, true, [](int n, std::vector<Write>& w) {
         if (n == 0) {
             slotSetup(w, 0, gBufB, 0.04, 4, 1.0, 1.0);   // melody-style: runs in the background

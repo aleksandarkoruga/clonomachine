@@ -15,9 +15,9 @@ revisions in use are pinned in `deps.lock`.
 
 | Path | What |
 |---|---|
-| `rtl/sampler_engine.v` | audio engine: 2 slots × 32 grains, per-grain SDRAM line cache, gate, stutter, latency line, algorithm crossfade, mixer |
+| `rtl/sampler_engine.v` | audio engine: 2 slots × 32 grains, per-grain SDRAM line cache, gate, stutter, latency line, algorithm crossfade, stereo mixer (per-slot left/right/both) |
 | `rtl/pv_unit.v` | phase vocoder (Bungee Basic) shared by the slots: FFT, CORDIC, partials, overlap-add rings |
-| `rtl/dsm_dac.v` | 2nd-order ΔΣ → 4-bit R-2R (mode 0) or 1-bit (mode 1), OSR 256 |
+| `rtl/dsm_dac.v` | 2nd-order ΔΣ → 4-bit R-2R (mode 0) or 1-bit (mode 1), OSR 256; one per jack channel |
 | `rtl/*.hex` | Hann / 2^x / PV sine, CORDIC, synthesis-window ROMs (`scripts/gen_roms.py`) |
 | `model/` | bit-exact C++ golden models (engine, `pv_model`), float references (BufGrainPlay, `pv_float` = Bungee), `pv_render`, `test_pv_engine` |
 | `sim/` | Verilator: RTL vs model (`make run`), PV unit job by job (`make pvrun`), DSM spectrum test |
@@ -89,6 +89,8 @@ channels (mixed to mono), any rate.
 - Stutter: TRIG latches POS; `REPEATS` retrigger pulses every `INTERVAL` samples
   re-latch the playhead (no record buffer).
 - Engine rate 48014.3 Hz (PLL 49.1667 MHz); tempo and pitch are compensated.
+- Outputs: slot 0 (drums) on the left channel, every other slot on the right;
+  `/slot/n/out` 0 left, 1 right, 2 both.
 - External clock (24 ppq `clockTrig`, start/stop, internal/external mode): not yet.
 
 ## Board facts (this unit)

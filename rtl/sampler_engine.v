@@ -50,8 +50,9 @@ module sampler_engine #(
     input  wire [15:0]        fill_data,
 
     output reg                out_stb,
-    output reg signed [23:0]  out_sample,
-    output wire               tick_out,     // sample-period strobe (DAC latches out_sample)
+    output reg signed [23:0]  out_l,        // left / right mix (slot OUT bits)
+    output reg signed [23:0]  out_r,
+    output wire               tick_out,     // sample-period strobe (DACs latch out_l / out_r)
 
     output reg                stat_we,
     output reg  [5:0]         stat_addr,
@@ -143,6 +144,7 @@ module sampler_engine #(
     reg [15:0] r_amp      [0:N_SLOTS-1];
     reg [15:0] r_algo     [0:N_SLOTS-1];   // ALGO_AMP
     reg [2:0]  r_algosel  [0:N_SLOTS-1];   // ALGO: [1:0] algorithm, [2] PV no transient
+    reg [1:0]  r_out      [0:N_SLOTS-1];   // OUT: [0] left, [1] right
     reg [4:0]  pend_stb   [0:N_SLOTS-1];
     reg [15:0] g_master;
     reg [31:0] g_beatinc;
@@ -295,7 +297,7 @@ module sampler_engine #(
     reg  [55:0] off;
     reg  [31:0] wp0;
     reg  signed [27:0] o1;
-    reg  signed [26:0] mix;
+    reg  signed [26:0] mix_l, mix_r;
 
     // grain scratch
     reg  [31:0] g_wp, g_wi;
@@ -513,6 +515,7 @@ module sampler_engine #(
                     5'd19: r_algosel[sl]  <= cmd_data[2:0];
                     5'd20: r_amp[sl]      <= cmd_data[15:0];
                     5'd21: r_algo[sl]     <= cmd_data[15:0];
+                    5'd22: r_out[sl]      <= cmd_data[1:0];
                     default: ;
                     endcase
                 end
@@ -520,7 +523,8 @@ module sampler_engine #(
                 tick_pend <= 1'b0;
                 cyc       <= 16'd1;
                 cs        <= 0;
-                mix       <= 0;
+                mix_l     <= 0;
+                mix_r     <= 0;
                 state     <= ST_SLOT;
             end
             // stream status words
@@ -1168,7 +1172,8 @@ module sampler_engine #(
             end else begin
                 so = sat24((x_p1 + mp) >>> 16);
                 s_out[cs] <= so;
-                mix   <= mix + so;
+                if (r_out[cs][0]) mix_l <= mix_l + so;
+                if (r_out[cs][1]) mix_r <= mix_r + so;
                 // deactivation clear job (faded out)
                 pj_valid <= x_clr;
                 pj_clear <= 1'b1;
@@ -1182,7 +1187,7 @@ module sampler_engine #(
             if (pj_valid && !pj_ready)
                 pv_drops <= pv_drops + 1'b1;
             if (cs == N_SLOTS - 1) begin
-                ma    <= {{23{mix[26]}}, mix};
+                ma    <= {{23{mix_l[26]}}, mix_l};
                 mb    <= $signed({2'b00, g_master});
                 mret  <= ST_MIX0;
                 state <= ST_MULW;
@@ -1192,7 +1197,14 @@ module sampler_engine #(
             end
         end
         ST_MIX0: begin
-            out_sample <= sat24(mp >>> 12);
+            out_l <= sat24(mp >>> 12);
+            ma    <= {{23{mix_r[26]}}, mix_r};
+            mb    <= $signed({2'b00, g_master});
+            mret  <= ST_MIX1;
+            state <= ST_MULW;
+        end
+        ST_MIX1: begin
+            out_r      <= sat24(mp >>> 12);
             out_stb    <= 1'b1;
             beat       <= beat + {32'd0, g_beatinc};
             samples    <= samples + 1'b1;
@@ -1286,6 +1298,7 @@ module sampler_engine #(
                 r_amp[i]      <= 16'd4096;
                 r_algo[i]     <= 16'd32768;
                 r_algosel[i]  <= 3'd0;
+                r_out[i]      <= 2'b11;
                 pv_act[i]     <= 1'b0;
                 pv_alg[i]     <= 2'd0;
                 pv_xfs[i]     <= 32'd0;

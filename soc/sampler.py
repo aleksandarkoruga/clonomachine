@@ -113,9 +113,9 @@ class Sampler(LiteXModule):
 
         # Engine -----------------------------------------------------------------------------------
         out_stb    = Signal()
-        out_sample = Signal(24)
+        out_l      = Signal(24)
+        out_r      = Signal(24)
         tick       = Signal()
-        code       = Signal(4)
         rst        = Signal()
         self.comb += rst.eq(ResetSignal(cd_audio) | eng_reset)
         self.specials += Instance("sampler_engine",
@@ -138,25 +138,23 @@ class Sampler(LiteXModule):
             i_fill_valid = fill_fifo.source.valid,
             i_fill_data  = fill_fifo.source.data,
             o_out_stb    = out_stb,
-            o_out_sample = out_sample,
+            o_out_l      = out_l,
+            o_out_r      = out_r,
             o_tick_out   = tick,
             o_stat_we    = stat_wp.we,
             o_stat_addr  = stat_wp.adr,
             o_stat_data  = stat_wp.dat_w,
         )
-        self.specials += Instance("dsm_dac",
-            i_clk    = ClockSignal(cd_audio),
-            i_rst    = rst,
-            i_tick   = tick,
-            i_sample = out_sample,
-            i_mode   = dsm_mode,
-            o_code   = code,
-        )
-        # Mono for now: same stream on both channels (OUT_BUS routing comes with the mixer).
-        self.comb += [
-            audio_pads.l.eq(code),
-            audio_pads.r.eq(code),
-        ]
+        # one delta-sigma DAC per jack channel; each slot's OUT register picks left / right / both
+        for sample, pad in ((out_l, audio_pads.l), (out_r, audio_pads.r)):
+            self.specials += Instance("dsm_dac",
+                i_clk    = ClockSignal(cd_audio),
+                i_rst    = rst,
+                i_tick   = tick,
+                i_sample = sample,
+                i_mode   = dsm_mode,
+                o_code   = pad,
+            )
         platform.add_source(os.path.join(RTL_DIR, "sampler_engine.v"))
         platform.add_source(os.path.join(RTL_DIR, "pv_unit.v"))
         platform.add_source(os.path.join(RTL_DIR, "dsm_dac.v"))

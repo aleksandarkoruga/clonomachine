@@ -62,7 +62,8 @@ static void cmd_status(void) {
                sl->bg_advance, sl->algo ? "pv" : "grain");
         {
             const uint32_t pv = eng_status(s * 8 + SMP_S_PV);
-            printf(" (pv %s, xfade %lu%%)\n", (pv & 1) ? "on" : "off", (unsigned long)(((pv >> 16) * 100 + 32768) >> 16));
+            printf(" (pv %s, xfade %lu%%)  out %s\n", (pv & 1) ? "on" : "off",
+                   (unsigned long)(((pv >> 16) * 100 + 32768) >> 16), sl->out == 0 ? "L" : sl->out == 1 ? "R" : "LR");
         }
     }
 }

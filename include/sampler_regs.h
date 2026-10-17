@@ -48,7 +48,8 @@ enum {
     SMP_R_ALGO        = 19, /* bits1:0 algorithm (0 grain, 1 phase vocoder), bit2 PV no transient */
     SMP_R_AMP         = 20, /* u4.12                                                            */
     SMP_R_ALGO_AMP    = 21, /* u1.15                                                            */
-    SMP_NUM_SLOT_REGS = 22
+    SMP_R_OUT         = 22, /* bit0 to the left output, bit1 to the right (reset 3: both)      */
+    SMP_NUM_SLOT_REGS = 23
 };
 
 #define SMP_CTRL_ENABLE    (1u << 0)

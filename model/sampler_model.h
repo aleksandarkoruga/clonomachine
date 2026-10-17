@@ -86,7 +86,8 @@ public:
     void write(uint32_t addr, uint32_t data);
     uint32_t status(uint32_t idx) const;
     // Produces one output sample (s24, Q8 sample units; mono, both DAC channels get it).
-    int32_t step();
+    int32_t step();       // left output; the right one is in outR
+    int32_t outR = 0;
 
     std::vector<int16_t> mem; // SDRAM image, 16-bit words
     int nSlots;

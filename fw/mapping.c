@@ -141,6 +141,7 @@ static void raw_param(int s, int p, int32_t v) {
     case P_NOTEMODE: sl->note_mode = v < 0 ? 0 : v > 2 ? 2 : v; break;
     case P_KILL: eng_slot_write(s, SMP_R_STROBE, SMP_STROBE_KILL); break;
     case P_ENABLE: sl->enabled = !!v; slot_apply_flags(s); break;
+    case P_OUT: sl->out = v < 0 ? 0 : v > 2 ? 2 : v; slot_apply_output(s); break;
     default: break;
     }
 }
