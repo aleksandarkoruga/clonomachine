@@ -111,6 +111,10 @@ extern void (*samples_drain_hook)(void);
    1 = prefetch target (next bank), 0 = not needed (evictable, requests dropped). */
 int samples_bank_keep(int lib, int bank);
 
+/* Small files on the card (config): bytes read (buf NUL-terminated) / 0 written, -1 on error. */
+int samples_read_file(const char* path, char* buf, int n);
+int samples_write_file(const char* path, const char* buf, int n);
+
 /* Tempo from the length: bpm = 60/duration folded into [100, 200]. */
 uint32_t samples_track_bpm_q16(uint32_t frames, uint32_t sr, int32_t* beats_log2);
 

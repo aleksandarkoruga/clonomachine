@@ -15,7 +15,7 @@ revisions in use are pinned in `deps.lock`.
 
 | Path | What |
 |---|---|
-| `rtl/sampler_engine.v` | audio engine: 2 slots × 32 grains, per-grain SDRAM line cache, gate, stutter, latency line, algorithm crossfade, stereo mixer (per-slot left/right/both) |
+| `rtl/sampler_engine.v` | audio engine: 3 slots × 32 grains, per-grain SDRAM line cache, gate, stutter, latency line, algorithm crossfade, stereo mixer (per-slot left/right/both) |
 | `rtl/pv_unit.v` | phase vocoder (Bungee Basic) shared by the slots: FFT, CORDIC, partials, overlap-add rings |
 | `rtl/dsm_dac.v` | 2nd-order ΔΣ → 4-bit R-2R (mode 0) or 1-bit (mode 1), OSR 256; one per jack channel |
 | `rtl/*.hex` | Hann / 2^x / PV sine, CORDIC, synthesis-window ROMs (`scripts/gen_roms.py`) |
@@ -23,8 +23,8 @@ revisions in use are pinned in `deps.lock`.
 | `sim/` | Verilator: RTL vs model (`make run`), PV unit job by job (`make pvrun`), DSM spectrum test |
 | `include/sampler_regs.h` | engine register map (RTL, model, firmware) |
 | `include/sampler_events.h` | 8-byte control events + SLIP/CRC framing + RAW_PARAM ids |
-| `soc/ulx3s_sampler.py` | LiteX SoC (VexRiscv, SDRAM, SD, SPI flash, ESP32-S3 UART, sampler) |
-| `fw/` | firmware: SD index + SDRAM cache, tempo/slot logic, Monomachine map, shell |
+| `soc/ulx3s_sampler.py` | LiteX SoC (VexRiscv, SDRAM, SD, SPI flash, ESP32-S3 UART, USB host on US2 (OHCI), sampler) |
+| `fw/` | firmware: SD index + SDRAM cache, tempo/slot logic, USB-MIDI host + MIDI pages (`/midimap.json`), Monomachine map, shell |
 | `host/` | loader, console, flash script, OSC bridge, SuperCollider example |
 
 ## Build / run
@@ -72,6 +72,24 @@ channels (mixed to mono), any rate.
   first loaded (`list` shows the count, the boot line how many are analysed so far); used
   by `noteMode` 1/2.
 
+## MIDI (USB-MIDI cable on US2)
+
+A class-compliant USB-MIDI interface on **US2** (tested: CH345 cables, `1a86:752d`) is
+enumerated by the firmware. MIDI pages from **`/midimap.json`** on the card (written with the
+defaults when missing; edit on a PC, `midimap reload` on the console) map channels to voices:
+default Machinedrum MIDI machines on channel 5 (drums, voice 0), 3 (melody, voice 1), 6
+(third voice). Consecutive CCs from the page's first one (16, 16, 25) drive bufNum bank rate
+pitch gate interval amp overlap randPos randomPitch prob separation maxGrains tempoLock
+bgAdvance envHold pvTransient; mod wheel = grains / time stretcher, aftertouch = grainDur,
+pitch bend = cutter handover (voice 0) / noteMode. Other channels use the Monomachine table.
+
+- **Clock:** the global bpm follows MIDI clock (4-beat window, 0.1 bpm steps); `clock 0`
+  turns that off. **Start** restarts the beat and every background playhead, **Stop**
+  closes every gate, **Continue** changes nothing.
+- The Elektron TM-1 does not come up on US2 (it reboots: US2 seems to give it too little 5 V);
+  TurboMIDI from the Machinedrum can't be read by a plain cable (set the MD to 1x).
+- Console: `usb`, `usbdesc`, `midimon 1`, `midimap [reload]`, `midiin <st> <d1> <d2>` (hex).
+
 ## Behaviour notes (design decisions)
 
 - Grain engine = BufGrainPlay: "OLA stretch" and "granular" are only parameter values.
@@ -91,7 +109,10 @@ channels (mixed to mono), any rate.
 - Engine rate 48014.3 Hz (PLL 49.1667 MHz); tempo and pitch are compensated.
 - Outputs: slot 0 (drums) on the left channel, every other slot on the right;
   `/slot/n/out` 0 left, 1 right, 2 both.
-- External clock (24 ppq `clockTrig`, start/stop, internal/external mode): not yet.
+- Voices: 0 plays `/drums`, 1 and 2 play `/melody`. Defaults: time stretcher, drum notes on
+  transients, melody voices with `bgAdvance` (a note latches pos + the wall clock).
+- `bgAdvance`: the background playhead is the wall clock (tempo only); a trigger latches
+  pos + background, then the playhead runs at `rate` from there (slow, reverse...).
 
 ## Board facts (this unit)
 

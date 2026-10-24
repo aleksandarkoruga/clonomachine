@@ -16,6 +16,7 @@
 #include "samples.h"
 #include "slip.h"
 #include "slot.h"
+#include "usbh.h"
 
 static struct slip g_slip_console, g_slip_esp;
 extern volatile unsigned int uart_rx_overflows; /* fw/uart.c */
@@ -99,7 +100,9 @@ static int name_eq(const char* a, const char* b) { /* case-insensitive */
 static void help(void) {
     puts("status | list [lib [bank]] | pool | rescan | bank <slot> <n> | buf <slot> <n> | bpm <x>\n"
          "trig <slot> [pos] | note <slot> <note> [vel] | set <slot> <param> <value> | gatetest <slot>\n"
-         "dsm <0|1> | norm <0|1> | verbose <0|1> | reset");
+         "dsm <0|1> | norm <0|1> | verbose <0|1> | reset\n"
+         "usb | usbdesc | midimon <0|1> | usbpull <0 pull-downs|1 released> | clock <0|1> (follow MIDI clock)\n"
+         "midimap [reload] (MIDI pages from /midimap.json) | midiin <status> <d1> <d2> (hex, as from USB)");
     fputs("params:", stdout);
     for (int p = 0; p < P_NUM_PARAMS; ++p)
         printf(" %s", g_param_names[p]);
@@ -152,6 +155,17 @@ static void shell_line(char* line) {
         apply_all();
     }
     else if (!strcmp(c, "reset")) ctrl_reset_write(1);
+    else if (!strcmp(c, "usb")) { usbh_status(); mapping_midi_status(); }
+    else if (!strcmp(c, "usbdesc")) usbh_descriptors();
+    else if (!strcmp(c, "midimap")) { if (argc > 1) mapping_midimap_load(); mapping_midimap_print(); }
+    else if (!strcmp(c, "midiin") && argc > 1) /* hex bytes, as if they came from USB */
+        mapping_midi((uint8_t)strtoul(argv[1], NULL, 16), (uint8_t)(argc > 2 ? strtoul(argv[2], NULL, 16) : 0),
+                     (uint8_t)(argc > 3 ? strtoul(argv[3], NULL, 16) : 0));
+    else if (!strcmp(c, "midimon") && argc > 1) g_midi_monitor = atoi(argv[1]);
+    else if (!strcmp(c, "usbpull") && argc > 1) usbh_set_pull(atoi(argv[1]));
+    else if (!strcmp(c, "usbdbg")) usbh_debug();
+    else if (!strcmp(c, "usbwatch")) usbh_watch(argc > 1 ? atoi(argv[1]) : 2000);
+    else if (!strcmp(c, "clock") && argc > 1) g_clock_follow = atoi(argv[1]);
     else if (!strcmp(c, "bpm") && argc > 1) set_global_bpm((uint32_t)(((int64_t)parse_q16(argv[1]) * 1000) >> 16));
     else if (!strcmp(c, "dsm") && argc > 1) sampler_ctrl_write((sampler_ctrl_read() & ~1u) | (atoi(argv[1]) & 1));
     else if (!strcmp(c, "norm") && argc > 1) g_normalize = atoi(argv[1]);
@@ -249,6 +263,7 @@ static void route_byte(uint8_t c, int in_loader) {
 /* samples_idle_hook: called by the loader between slices of work */
 static void console_pump(void) {
     console_drain();
+    usbh_poll(); /* MIDI keeps flowing while banks load */
     while (g_cin_r != g_cin_w) {
         const uint8_t c = g_cin[g_cin_r];
         g_cin_r = (g_cin_r + 1) & (sizeof(g_cin) - 1);
@@ -308,6 +323,8 @@ int main(void) {
     help();
     printf("smp> ");
 
+    mapping_midimap_load();
+    usbh_init();
     samples_idle_hook = console_pump;  /* loader slices: dispatch events */
     samples_drain_hook = console_drain; /* inside SD reads: buffer only */
     for (;;) {
@@ -323,6 +340,7 @@ int main(void) {
             route_byte(c, 0);
         }
         poll_esp();
+        usbh_poll();
         samples_poll();
         slots_service();
     }

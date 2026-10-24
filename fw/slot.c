@@ -107,14 +107,16 @@ void slots_init(void) {
     memset(g_slots, 0, sizeof(g_slots));
     for (int s = 0; s < NUM_SLOTS; ++s) {
         struct slot* sl = &g_slots[s];
-        sl->lib = s < MAX_LIBS ? s : 0;
+        sl->lib = s == 0 ? 0 : 1;       /* voice 0 /drums, every other voice /melody */
         sl->bank = -1;
         sl->buf = -1;
         sl->enabled = 1;
         sl->tempo_lock = 1;
-        sl->algo = 0;
+        sl->algo = 1;                   /* the time stretcher (phase vocoder) */
+        sl->note_mode = s == 0 ? 1 : 0; /* drum notes start on transients */
         sl->pv_transient = 1;
         sl->out = s == 0 ? 0 : 1;       /* drums left, every other voice right */
+        sl->bg_advance = s != 0;        /* melody voices: a note latches pos + the wall clock */
         sl->max_grains = 32;
         /* initial BufGrainPlay values: a smooth time-stretch; any other texture is just
            other values of the same parameters */
@@ -145,8 +147,11 @@ static void apply_rate_pitch(int s) {
     if (!smp)
         return;
     const int64_t srf = sr_factor_q24(smp);
-    const int64_t r24 = ((int64_t)sl->rate_q16 * slot_tempo_ratio_q24(s)) >> 16;
+    const int64_t t24 = slot_tempo_ratio_q24(s);
+    const int64_t r24 = ((int64_t)sl->rate_q16 * t24) >> 16;
     eng_slot_write(s, SMP_R_PHASOR_INC, (uint32_t)clampi((r24 * srf) >> 24, -0x7F000000LL, 0x7F000000LL));
+    /* the background (bgAdvance) is the wall clock: tempo only, RATE applies from the latch */
+    eng_slot_write(s, SMP_R_BG_INC, (uint32_t)clampi((t24 * srf) >> 24, 0, 0x7F000000LL));
     eng_slot_write(s, SMP_R_PITCH,
                    (uint32_t)clampi(((int64_t)sl->pitch_q16 * srf) >> 16, -0x7F000000LL, 0x7F000000LL));
 }

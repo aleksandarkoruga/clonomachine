@@ -129,6 +129,7 @@ module sampler_engine #(
     reg [23:0] r_frames   [0:N_SLOTS-1];
     reg [31:0] r_pos      [0:N_SLOTS-1];
     reg [31:0] r_phinc    [0:N_SLOTS-1];
+    reg [31:0] r_bginc    [0:N_SLOTS-1];   // BG_INC: background phasor (no RATE)
     reg [31:0] r_pitch    [0:N_SLOTS-1];
     reg [31:0] r_wininc   [0:N_SLOTS-1];
     reg [31:0] r_overlap  [0:N_SLOTS-1];
@@ -499,6 +500,7 @@ module sampler_engine #(
                     5'd3:  r_frames[sl]   <= cmd_data[23:0];
                     5'd4:  r_pos[sl]      <= cmd_data;
                     5'd5:  r_phinc[sl]    <= cmd_data;
+                    5'd23: r_bginc[sl]    <= cmd_data;
                     5'd6:  r_pitch[sl]    <= cmd_data;
                     5'd7:  r_wininc[sl]   <= cmd_data;
                     5'd8:  r_overlap[sl]  <= cmd_data;
@@ -964,7 +966,7 @@ module sampler_engine #(
             if (pn >= c_FQ)    pn = pn - c_FQ;
             else if (pn < 0)   pn = pn + c_FQ;
             s_phasor[cs] <= pn[55:0];
-            bn = $signed({2'b00, s_bgph[cs]}) + $signed({{18{r_phinc[cs][31]}}, r_phinc[cs], 8'd0});
+            bn = $signed({2'b00, s_bgph[cs]}) + $signed({{18{r_bginc[cs][31]}}, r_bginc[cs], 8'd0});
             if (bn >= c_FQ)    bn = bn - c_FQ;
             else if (bn < 0)   bn = bn + c_FQ;
             s_bgph[cs] <= bn[55:0];
@@ -1061,7 +1063,8 @@ module sampler_engine #(
             pj_slot   <= cs;
             pj_notr   <= r_algosel[cs][2];
             pj_ph     <= pvph;
-            pj_inc    <= (c_ctrl[1] && !c_ctrl[3]) ? 32'sd0 : $signed(r_phinc[cs]);
+            // pinned: frozen, or following the background phasor (POS_BG)
+            pj_inc    <= c_ctrl[1] ? (c_ctrl[3] ? $signed(r_bginc[cs]) : 32'sd0) : $signed(r_phinc[cs]);
             pj_rate   <= pvrate(r_pitch[cs]);
             pj_base   <= r_base[cs];
             pj_frames <= r_frames[cs];
@@ -1283,6 +1286,7 @@ module sampler_engine #(
                 r_frames[i]   <= 24'd128;
                 r_pos[i]      <= 32'd0;
                 r_phinc[i]    <= 32'h01000000;
+                r_bginc[i]    <= 32'h01000000;
                 r_pitch[i]    <= 32'h01000000;
                 r_wininc[i]   <= 32'd2236962;
                 r_overlap[i]  <= 32'h04000000;

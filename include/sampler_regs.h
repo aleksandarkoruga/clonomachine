@@ -49,7 +49,9 @@ enum {
     SMP_R_AMP         = 20, /* u4.12                                                            */
     SMP_R_ALGO_AMP    = 21, /* u1.15                                                            */
     SMP_R_OUT         = 22, /* bit0 to the left output, bit1 to the right (reset 3: both)      */
-    SMP_NUM_SLOT_REGS = 23
+    SMP_R_BG_INC      = 23, /* s8.24 background phasor = TEMPO_RATIO*bufSR/engineSR: the wall
+                               clock of POS_BG, without RATE (RATE applies from the latch)    */
+    SMP_NUM_SLOT_REGS = 24
 };
 
 #define SMP_CTRL_ENABLE    (1u << 0)

@@ -37,6 +37,7 @@ void Slot::reset(int idx) {
     r[SMP_R_CTRL] = 0;
     r[SMP_R_FRAMES] = 128;
     r[SMP_R_PHASOR_INC] = 1u << 24;
+    r[SMP_R_BG_INC] = 1u << 24;
     r[SMP_R_PITCH] = 1u << 24;
     r[SMP_R_WIN_INC] = 2236962; // 2^32/1920 (40 ms)
     r[SMP_R_OVERLAP] = 4u << 24;
@@ -216,7 +217,7 @@ int32_t Slot::step(const std::vector<int16_t>& mem, const Tables& t) {
         phasor -= F;
     else if (phasor < 0)
         phasor += F;
-    bgPhasor += inc;
+    bgPhasor += static_cast<int64_t>(static_cast<int32_t>(r[SMP_R_BG_INC])) << 8; /* wall clock, no RATE */
     if (bgPhasor >= F)
         bgPhasor -= F;
     else if (bgPhasor < 0)
@@ -358,8 +359,10 @@ int32_t Engine::mixSlot(int s) {
     if (p.active && sl.pvRestart)
         restart = true;
 
-    const int64_t inc = ((ctrl & SMP_CTRL_POS_PIN) && !(ctrl & SMP_CTRL_POS_BG))
-        ? 0 : static_cast<int64_t>(static_cast<int32_t>(sl.r[SMP_R_PHASOR_INC])) << 8;
+    /* pinned: frozen, or following the background phasor (POS_BG) */
+    const int64_t inc = (ctrl & SMP_CTRL_POS_PIN)
+        ? ((ctrl & SMP_CTRL_POS_BG) ? static_cast<int64_t>(static_cast<int32_t>(sl.r[SMP_R_BG_INC])) << 8 : 0)
+        : static_cast<int64_t>(static_cast<int32_t>(sl.r[SMP_R_PHASOR_INC])) << 8;
     if (restart) {
         // old content: fades out from c0, everything later is cleared
         const uint32_t c0 = e + SMP_LATENCY;

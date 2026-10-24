@@ -1045,6 +1045,28 @@ void samples_sdbench(void) {
     }
 }
 
+int samples_read_file(const char* path, char* buf, int n) {
+    FIL f;
+    UINT got = 0;
+    if (!g_card_ok || n < 1 || f_open(&f, path, FA_READ) != FR_OK)
+        return -1;
+    if (f_read(&f, buf, (UINT)(n - 1), &got) != FR_OK)
+        got = 0;
+    f_close(&f);
+    buf[got] = 0;
+    return (int)got;
+}
+
+int samples_write_file(const char* path, const char* buf, int n) {
+    FIL f;
+    UINT put = 0;
+    if (!g_card_ok || f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK)
+        return -1;
+    const FRESULT r = f_write(&f, buf, (UINT)n, &put);
+    f_close(&f);
+    return (r == FR_OK && put == (UINT)n) ? 0 : -1;
+}
+
 int samples_init(void) {
     if (g_job.active) { /* rescan while loading: drop the job before the table is rebuilt */
         f_close(&g_job.f);
@@ -1084,6 +1106,8 @@ int samples_init(void) {
 
 #else  /* no SD card controller */
 int samples_init(void) { return 0; }
+int samples_read_file(const char* path, char* buf, int n) { (void)path; (void)buf; (void)n; return -1; }
+int samples_write_file(const char* path, const char* buf, int n) { (void)path; (void)buf; (void)n; return -1; }
 void samples_want(int lib, int bank, int idx, int prio) { (void)lib; (void)bank; (void)idx; (void)prio; }
 int samples_poll(void) { return 0; }
 static uint32_t g_load_bytes, g_load_ms, g_load_count;

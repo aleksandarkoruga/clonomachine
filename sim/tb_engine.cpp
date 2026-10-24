@@ -334,6 +334,32 @@ int main(int argc, char** argv) {
     }});
 
     // ---- phase vocoder
+    scs.push_back({"bg_wallclock_rate", 36000, 40, true, [](int n, std::vector<Write>& w) {
+        // BG_INC (wall clock) separate from RATE: triggers latch pos + background, the playhead
+        // then runs at its own rate (slow, reverse); a pinned PV slot follows the background
+        if (n == 0) {
+            slotSetup(w, 0, gBufB, 0.04, 4, 0.25, 1.0);
+            w.push_back({SMP_ADDR(0, SMP_R_BG_INC), q24(1.1)});
+            w.push_back({SMP_ADDR(0, SMP_R_CTRL), SMP_CTRL_ENABLE | SMP_CTRL_ENV_HOLD | SMP_CTRL_POS_BG});
+            w.push_back({SMP_ADDR(0, SMP_R_STROBE), SMP_STROBE_TRIG});
+            slotSetup(w, 1, gBufA, 0.05, 3, 0.3, 1.0);
+            w.push_back({SMP_ADDR(1, SMP_R_ALGO), 1});
+            w.push_back({SMP_ADDR(1, SMP_R_BG_INC), q24(0.8)});
+            w.push_back({SMP_ADDR(1, SMP_R_CTRL), SMP_CTRL_ENABLE | SMP_CTRL_ENV_HOLD | SMP_CTRL_POS_PIN | SMP_CTRL_POS_BG});
+            w.push_back({SMP_ADDR(1, SMP_R_POS), 3000u << 8});
+            w.push_back({SMP_ADDR(1, SMP_R_STROBE), SMP_STROBE_TRIG});
+        }
+        if (n % 6000 == 2000) {
+            w.push_back({SMP_ADDR(0, SMP_R_POS), ((n * 7u) % gBufB.frames) << 8});
+            w.push_back({SMP_ADDR(0, SMP_R_STROBE), SMP_STROBE_TRIG});
+        }
+        if (n == 14000)
+            w.push_back({SMP_ADDR(0, SMP_R_PHASOR_INC), q24(-1.0)});   // reverse; wall clock goes on
+        if (n == 26000) {
+            w.push_back({SMP_ADDR(0, SMP_R_STROBE), SMP_STROBE_BG_RESET});
+            w.push_back({SMP_ADDR(1, SMP_R_STROBE), SMP_STROBE_BG_RESET});
+        }
+    }});
     scs.push_back({"pv_basic", 30000, 40, true, [](int n, std::vector<Write>& w) {
         if (n == 0) {
             slotSetup(w, 0, gBufA, 0.04, 4, 0.5, 1.0);
