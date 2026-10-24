@@ -603,8 +603,12 @@ static void tr_store(struct sample* s, const uint32_t* p, int n) {
     g_tr_used += (uint32_t)n;
 }
 
+/* date/time 0: written by the PC tool (host/prepare_sd.cpp), which can't know the FAT
+   timestamps: matched by name and size, rewritten with the real ones */
+static int stamp_match(uint16_t d, uint16_t t, uint16_t rd, uint16_t rt) { return (d == rd && t == rt) || (!rd && !rt); }
+
 static int trf_match(const struct sample* s, const struct trf_rec* r) {
-    return s->fsize == r->fsize && s->fdate == r->fdate && s->ftime == r->ftime && sample_key(s) == r->hash;
+    return s->fsize == r->fsize && stamp_match(s->fdate, s->ftime, r->fdate, r->ftime) && sample_key(s) == r->hash;
 }
 
 static int trf_load(int lib) {
@@ -639,6 +643,8 @@ static int trf_load(int lib) {
                 tr_store(s, pos, r.n);
                 if (!s->peak)
                     s->peak = r.peak;
+                if (!r.fdate && !r.ftime)
+                    g_tr_dirty[lib] = 1; /* store the real timestamps */
                 ++got;
             }
         }
@@ -711,7 +717,9 @@ static int index_lib(int l) {
         while (j < ni && name_order(g_idx[j].name, s->name) < 0)
             ++j;
         const struct idx_rec* r = (j < ni && !strcmp(g_idx[j].name, s->name)) ? &g_idx[j] : 0;
-        if (r && r->fsize == s->fsize && r->fdate == s->fdate && r->ftime == s->ftime && r->frames) {
+        if (r && r->fsize == s->fsize && stamp_match(s->fdate, s->ftime, r->fdate, r->ftime) && r->frames) {
+            if (!r->fdate && !r->ftime)
+                g_idx_dirty[l] = 1; /* store the real timestamps */
             s->data_off = r->data_off;
             s->data_len = r->data_len;
             s->sr = r->sr;
