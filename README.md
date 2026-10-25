@@ -70,12 +70,12 @@ channels (mixed to mono), any rate.
   only new or changed files are parsed (731 files index in ~1.2 s).
 - **Seamless switching:** every grain keeps reading the buffer it started in, the playhead
   moves to the same sixteenth of the bar in the new loop: switches crossfade, no gap.
-- **Preparing a card on the PC** (faster loads, nothing left to analyse on the board):
-  `host/prepare_sd <mount>` reports, `--write` converts every WAV to mono 16-bit (own rate,
-  normalised) and writes `.smpidx` / `.smptr` with the firmware's own code; drum loops that
-  are not 2^k beats get a fitting whole-beats tempo (`list` shows "N beats (PC)"). Build:
-  `g++ -O2 -std=c++17 -Ifw -Iinclude host/prepare_sd.cpp fw/wavutil.c fw/transients.c`
-  (compile the two .c files with gcc). Back the card up first: it converts in place.
+- **Preparing a card on the PC** (faster loads, nothing left to analyse on the board), also
+  after adding new samples: `host/prepare_sd.sh /run/media/$USER/FPGA` reports,
+  `... --write` backs the card up to `~/Music/fpga_sd_backup_<date>`, converts every WAV to
+  mono 16-bit (own rate, normalised) and writes `.smpidx` / `.smptr` with the firmware's own
+  code. Drum loops that are not 2^k beats get a fitting whole-beats tempo (`list` shows
+  "N beats (PC)"); uncertain ones are listed as "maybe". The script builds the tool itself.
 - **Transients:** `<dir>/.smptr` caches up to 64 onsets per sample, found when a sample is
   first loaded (`list` shows the count, the boot line how many are analysed so far); used
   by `noteMode` 1/2.

@@ -265,8 +265,9 @@ struct LoopTempo { double fit_len = 0, fit_new = 0, bpm = 0; int beats = 0; uint
 // A whole number of beats with a real tempo (65..210 bpm before folding into 100..200, as
 // the tempo folds), scored on the transients; powers of two and the tempo in the name win
 // close calls. Used only when SC's length-based tempo fits badly (< 60 %) and the new one
-// fits clearly better (+25 points) and well (>= 80 %); between 70 and 80 % (swing makes any
-// 16th grid fit worse) it is only reported as a suggestion.
+// fits clearly better (+25 points) and well (>= 80 %). Between 70 and 80 % (swing makes any
+// 16th grid fit worse) the best guess is taken only for an even number of beats at a real
+// tempo of 80+ bpm (3-bar loops); odd counts and slow 'tempi' are reported, not applied.
 static LoopTempo loop_tempo(const std::string& name, uint32_t frames, uint32_t sr, const uint32_t* pos, int n) {
     LoopTempo t;
     int32_t k = 0;
@@ -288,11 +289,17 @@ static LoopTempo loop_tempo(const std::string& name, uint32_t frames, uint32_t s
             t.beats = B;
         }
     }
-    t.beats = int(std::lrint(secs * t.bpm / 60)); /* at the folded tempo */
+    const int raw_beats = t.beats;                     /* the count at the real (unfolded) tempo */
+    const double raw = 60.0 * raw_beats / secs;
+    t.beats = int(std::lrint(secs * t.bpm / 60));     /* at the folded tempo */
     if (t.fit_new - t.fit_len >= 0.25 && t.fit_new >= 0.8)
         t.bpm_x100 = uint16_t(std::lrint(t.bpm * 100));
-    else if (t.fit_new - t.fit_len >= 0.25 && t.fit_new >= 0.7)
-        t.maybe = true;
+    else if (t.fit_new - t.fit_len >= 0.25 && t.fit_new >= 0.7) {
+        if (t.beats % 2 == 0 && raw >= 80)
+            t.bpm_x100 = uint16_t(std::lrint(t.bpm * 100)); /* best guess */
+        else
+            t.maybe = true;
+    }
     return t;
 }
 
