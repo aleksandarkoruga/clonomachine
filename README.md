@@ -37,6 +37,8 @@ host/flash.sh [all|bit|fw]                          # SPI flash: boots standalon
 python host/ftdi_console.py -i                      # shell (status, list, buf, note, set, ...)
 python host/osc_bridge.py                           # OSC udp:57130 -> board, 1 Mbaud (see host/sampler_example.scd)
 python host/osc_stress.py                           # Monomachine-like load test against the bridge
+python host/console_cmd.py status usb "list 1"      # one-shot console lines (fixed read time each)
+python host/check_wallclock.py                      # board check: bgAdvance latch vs rate
 cd sim && make run                                  # RTL == model regression
 cd sim && make pvrun                                # pv_unit == pv_model, job by job, all stages
 g++ -O2 -std=c++20 -fwrapv -DPV_RTL_DIR=\"$PWD/rtl\" -o pv_render model/pv_render.cpp model/pv_float.cpp model/pv_model.cpp
