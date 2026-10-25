@@ -86,6 +86,7 @@ static struct {
     uint8_t in_ep, out_ep, iface, cfg, cls;
     char product[40];
     uint32_t msgs, packets, errors, attaches, bounces;
+    uint32_t cc_count[16];                /* bulk-IN errors per OHCI condition code */
     uint16_t cfg_len;
 } g_u;
 
@@ -383,6 +384,7 @@ void usbh_poll(void) {
         const struct td* t = &g_btd[g_u.active];
         if (h & 1) { /* halted: drop the TD, carry on */
             ++g_u.errors;
+            ++g_u.cc_count[TD_CC(t->ctrl) & 15];
             g_ed_bulk.headp = ptr(&g_btd[g_u.active ^ 1]) | (h & 2);
             g_u.active ^= 1;
             bulk_queue(g_u.active);
@@ -397,8 +399,10 @@ void usbh_poll(void) {
         if (TD_CC(t->ctrl) == 0 || TD_CC(t->ctrl) == 9) {
             ++g_u.packets;
             parse(g_bbuf[a], n);
-        } else
+        } else {
             ++g_u.errors;
+            ++g_u.cc_count[TD_CC(t->ctrl) & 15];
+        }
         g_u.active ^= 1;
         bulk_queue(g_u.active);
         break;
@@ -417,6 +421,12 @@ void usbh_status(void) {
     printf("\n     attaches %lu (bounced %lu)  packets %lu  midi messages %lu  errors %lu\n",
            (unsigned long)g_u.attaches, (unsigned long)g_u.bounces, (unsigned long)g_u.packets,
            (unsigned long)g_u.msgs, (unsigned long)g_u.errors);
+    static const char* const cc_name[16] = {"ok", "CRC", "bit stuffing", "toggle mismatch", "stall",
+        "no response", "PID check", "unexpected PID", "data overrun", "data underrun", "?", "?",
+        "buffer overrun", "buffer underrun", "not accessed", "not accessed"};
+    for (int c = 1; c < 16; ++c)
+        if (g_u.cc_count[c])
+            printf("     %lu x %s\n", (unsigned long)g_u.cc_count[c], cc_name[c]);
 }
 
 /* Debug: controller and bulk-IN descriptor state */
