@@ -101,7 +101,7 @@ static void help(void) {
     puts("status | list [lib [bank]] | pool | rescan | bank <slot> <n> | buf <slot> <n> | bpm <x>\n"
          "trig <slot> [pos] | note <slot> <note> [vel] | set <slot> <param> <value> | gatetest <slot>\n"
          "dsm <0|1> | norm <0|1> | verbose <0|1> | reset\n"
-         "usb | usbdesc | midimon <0|1> | usbpull <0 pull-downs|1 released> | clock <0|1> (follow MIDI clock)\n"
+         "usb | usbdesc | midimon <0|1|2 raw|3 raw+clocks> | usbpull <0 pull-downs|1 released> | clock <0|1> (follow MIDI clock)\n"
          "midimap [reload] (MIDI pages from /midimap.json) | midiin <status> <d1> <d2> (hex, as from USB)");
     fputs("params:", stdout);
     for (int p = 0; p < P_NUM_PARAMS; ++p)

@@ -269,8 +269,24 @@ static int enumerate(void) {
     return 0;
 }
 
+/* midimon 2/3: the packet as it came off the bus (2 leaves out packets that are only clocks) */
+static void dump_raw(const uint8_t* p, int n) {
+    int clocks_only = 1;
+    for (int i = 0; i + 4 <= n; i += 4)
+        if ((p[i] | p[i + 1] | p[i + 2] | p[i + 3]) && !(p[i] == 0x0F && p[i + 1] == 0xF8))
+            clocks_only = 0;
+    if (clocks_only && g_midi_monitor < 3)
+        return;
+    printf("[usb %2d:", n);
+    for (int i = 0; i < n; ++i)
+        printf((i & 3) ? " %02x" : "  %02x", p[i]);
+    puts("]");
+}
+
 /* USB-MIDI event packets: [cable << 4 | CIN, MIDI bytes...] */
 static void parse(const uint8_t* p, int n) {
+    if (g_midi_monitor >= 2)
+        dump_raw(p, n);
     for (int i = 0; i + 4 <= n; i += 4, p += 4) {
         const uint8_t cin = p[0] & 0xF;
         if (!(p[0] | p[1] | p[2] | p[3]))
@@ -283,7 +299,7 @@ static void parse(const uint8_t* p, int n) {
         default: continue;            /* sysex, system common */
         }
         ++g_u.msgs;
-        if (g_midi_monitor && st != 0xF8)
+        if (g_midi_monitor == 1 && st != 0xF8)
             printf("[midi %02x %3u %3u  ch %u]\n", st, d1, d2, (st & 0xF) + 1);
         mapping_midi(st, d1, d2);
     }

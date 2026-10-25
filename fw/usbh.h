@@ -14,6 +14,6 @@ void usbh_set_pull(int mode);    /* US2 resistors: 0 pull-downs (host), 1 releas
 void usbh_watch(int ms);         /* debug: time the device's connects / disconnects     */
 void usbh_debug(void);           /* debug: controller registers, bulk-IN descriptors     */
 
-extern int g_midi_monitor;       /* print every incoming MIDI message                    */
+extern int g_midi_monitor;       /* 1 print every MIDI message, 2/3 raw USB packets      */
 
 #endif
