@@ -368,7 +368,8 @@ static void do_lib(const fs::path& dir, bool write, Totals& tot) {
                 continue;
             }
         }
-        const uint32_t F = w.frames, fsize = 44 + F * 2;
+        /* a file left as it is keeps its size (some carry chunks after the audio data) */
+        const uint32_t F = w.frames, fsize = rewrite ? 44 + F * 2 : uint32_t(fsize0);
         tot.after += fsize;
         const uint32_t len = wav_split_len(F, w.sr, name.c_str(), kMaxFrames);
         const uint32_t parts = len ? wav_split_count(F, len) : 1;
