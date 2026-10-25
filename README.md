@@ -70,7 +70,7 @@ channels (mixed to mono), any rate.
   only new or changed files are parsed (731 files index in ~1.2 s).
 - **Seamless switching:** every grain keeps reading the buffer it started in, the playhead
   moves to the same sixteenth of the bar in the new loop: switches crossfade, no gap.
-- **Transients:** `<dir>/.smptr` caches up to 32 onsets per sample, found when a sample is
+- **Transients:** `<dir>/.smptr` caches up to 64 onsets per sample, found when a sample is
   first loaded (`list` shows the count, the boot line how many are analysed so far); used
   by `noteMode` 1/2.
 

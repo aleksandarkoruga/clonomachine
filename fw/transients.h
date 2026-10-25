@@ -13,7 +13,7 @@
 
 #include <stdint.h>
 
-#define TR_MAX      32          /* transients per sample                               */
+#define TR_MAX      64          /* transients per sample (a 4-bar break has 40-60)     */
 #define TR_BLOCK    64          /* analysis block (samples)                            */
 #define TR_RISE     384         /* log2 Q8: 1.5 octaves (~9 dB) rise                   */
 #define TR_REFRACT  24          /* blocks (~35 ms at 44.1 kHz) between onsets          */

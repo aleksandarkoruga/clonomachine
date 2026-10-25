@@ -240,6 +240,7 @@ static void split_long(struct lib* L) {
             s->nseg = (uint16_t)parts;
             s->peak = 0; /* per part, cached in .smptr */
             s->bpm_q16 = samples_track_bpm_q16(len, s->sr, &s->beats_log2);
+            s->n16 = 0; /* parts are 2^k beats (bpm_x100 stays for the file's index record) */
         }
     }
     L->count = out;
@@ -379,7 +380,8 @@ struct idx_rec {              /* one per file (the parts of a split file are der
     uint32_t data_off, data_len, sr, frames;
     uint8_t  ch, bits;
     int16_t  peak;            /* 0 for split files: the parts' peaks are in .smptr */
-    uint8_t  fmt, pad[3];     /* 0 (version 1): PCM */
+    uint8_t  fmt, pad;        /* 0 (version 1): PCM */
+    uint16_t bpm_x100;        /* host/prepare_sd: tempo for loops that are not 2^k beats, 0 none */
 };
 static struct idx_rec g_idx[MAX_PER_LIB];
 static int g_idx_dirty[MAX_LIBS];
@@ -442,6 +444,7 @@ static void idx_save(int lib) {
         r.bits = s->bits;
         r.peak = s->nseg > 1 ? 0 : s->peak;
         r.fmt = s->fmt;
+        r.bpm_x100 = s->bpm_x100;
         f_write(&f, &r, sizeof(r), &n);
     }
     f_close(&f);
@@ -556,7 +559,9 @@ static void add_dir_wavs(struct lib* L, const char* dir, const char* prefix) {
 }
 
 /* ---- transients: pool + per-folder cache file ------------------------------------- */
-#define TR_POOL (MAX_LIBS * MAX_PER_LIB * TR_MAX)
+/* positions of all samples together: 96K (384 KB) holds today's 958 samples at the full 64
+   with room; when it is full, later samples are analysed at load but not kept */
+#define TR_POOL (96u * 1024u)
 static uint32_t g_tr_pool[TR_POOL];
 static uint32_t g_tr_used;
 static int g_tr_dirty[MAX_LIBS];
@@ -728,6 +733,7 @@ static int index_lib(int l) {
             s->bits = r->bits;
             s->peak = r->peak;
             s->fmt = r->fmt ? r->fmt : WAV_PCM;
+            s->bpm_x100 = r->bpm_x100;
             ++cached;
         } else {
             const int rc = parse_wav(l, s);
@@ -743,6 +749,12 @@ static int index_lib(int l) {
         s->seg = 0;
         s->nseg = 1;
         s->bpm_q16 = samples_track_bpm_q16(s->frames, s->sr, &s->beats_log2);
+        s->n16 = 0;
+        if (s->bpm_x100) { /* a loop of any number of beats: bpm and its 16ths from the PC tool */
+            s->bpm_q16 = (uint32_t)(((uint64_t)s->bpm_x100 << 16) / 100);
+            const uint64_t den = (uint64_t)6000 * s->sr;
+            s->n16 = (uint16_t)(((uint64_t)s->frames * s->bpm_x100 * 4 + den / 2) / den);
+        }
         L->s[out++] = *s;
     }
     if (out != L->count || ni != L->count)
@@ -1209,10 +1221,13 @@ void samples_list(int lib, int bank) {
                 snprintf(nm, sizeof(nm), "%s#%u", s->name, s->seg);
             else
                 snprintf(nm, sizeof(nm), "%s", s->name);
-            printf("  %3d %c %-40s %6lu ms %5lu Hz %uch %2ub%s  %3lu.%02lu bpm  2^%ld beats", i, s->ready ? '*' : ' ',
-                   nm, (unsigned long)ms, (unsigned long)s->sr, s->ch, s->bits, s->fmt == WAV_FLOAT ? "f" : "",
-                   (unsigned long)(s->bpm_q16 >> 16), (unsigned long)(((s->bpm_q16 & 0xFFFF) * 100) >> 16),
-                   (long)s->beats_log2);
+            printf("  %3d %c %-40s %6lu ms %5lu Hz %uch %2ub%s  %3lu.%02lu bpm", i, s->ready ? '*' : ' ', nm,
+                   (unsigned long)ms, (unsigned long)s->sr, s->ch, s->bits, s->fmt == WAV_FLOAT ? "f" : "",
+                   (unsigned long)(s->bpm_q16 >> 16), (unsigned long)(((s->bpm_q16 & 0xFFFF) * 100) >> 16));
+            if (s->n16)
+                printf("  %u beats (PC)", (unsigned)((s->n16 + 2) / 4));
+            else
+                printf("  2^%ld beats", (long)s->beats_log2);
             if (s->ntr == TR_NONE)
                 printf("  transients ?\n");
             else

@@ -40,6 +40,8 @@ struct sample {
     uint16_t seg, nseg;                /* part seg of nseg (nseg 1: the whole file)       */
     int32_t  beats_log2;               /* the loop is 2^beats_log2 beats long         */
     uint32_t bpm_q16;
+    uint16_t bpm_x100;                 /* tempo from the PC tool (any number of beats), 0 none */
+    uint16_t n16;                      /* 16ths in the loop, 0: 4 * 2^beats_log2          */
     int16_t  peak;                     /* 0 = not measured yet                            */
     uint8_t  ntr;                      /* transients (TR_NONE: not analysed yet)          */
     uint32_t tr;                       /* first transient in the pool                     */

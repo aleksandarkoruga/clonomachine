@@ -93,6 +93,8 @@ uint32_t slot_tempo_ratio_q24(int s) {
 static uint32_t sixteenths_of(const struct sample* smp) {
     if (!smp)
         return 16;
+    if (smp->n16)
+        return smp->n16;
     const int32_t k = smp->beats_log2;
     if (k < -2)
         return 1;
