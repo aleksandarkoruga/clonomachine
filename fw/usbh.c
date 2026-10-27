@@ -88,6 +88,8 @@ static struct {
     uint32_t msgs, packets, errors, attaches, bounces;
     uint32_t cc_count[16];                /* bulk-IN errors per OHCI condition code */
     uint16_t cfg_len;
+    int resets;                           /* controller port resets in the last port reset          */
+    const char* step;                     /* enumeration step (for the failure message)              */
 } g_u;
 
 static inline uint32_t now_samples(void) { return eng_status(SMP_SG_SAMPLES); }
@@ -145,7 +147,8 @@ static int control(uint8_t rtype, uint8_t req, uint16_t val, uint16_t idx, uint1
         if ((h & ~0xFu) == ptr(t3))
             break;
         if ((h & 1) || ms_since(t) > 500) {
-            printf("USB: control %02x %02x failed (%s, cc %lu %lu %lu)\n", rtype, req, (h & 1) ? "halted" : "timeout",
+            printf("USB: control %02x %02x %04x at address %lu failed (%s, cc %lu %lu %lu)\n", rtype, req, val,
+                   (unsigned long)(g_ed_ctrl.ctrl & 0x7F), (h & 1) ? "halted" : "timeout",
                    (unsigned long)TD_CC(t0->ctrl), (unsigned long)TD_CC(t1->ctrl), (unsigned long)TD_CC(t2->ctrl));
             g_ed_ctrl.headp = ptr(t3);
             g_ed_ctrl.ctrl |= ED_SKIP;
@@ -197,16 +200,28 @@ static void bulk_queue(int a) {
 }
 
 static int enumerate(void) {
-    g_ed_ctrl.ctrl = ED_SKIP | (g_u.lowspeed ? ED_LOWSPEED : 0) | (8u << 16);   /* address 0, EP 0, mps 8 */
-    if (get_desc(1, 0, 8) < 8)
+    /* first read at address 0 as Linux does it: 64 bytes on a 64-byte EP0 (a device with 8-byte
+       packets ends the stage with a short packet), up to 3 tries */
+    g_u.step = "device descriptor at address 0";
+    g_ed_ctrl.ctrl = ED_SKIP | (g_u.lowspeed ? ED_LOWSPEED | (8u << 16) : (64u << 16)); /* address 0, EP 0 */
+    int got = -1;
+    for (int k = 0; k < 3 && got < 8; ++k) {
+        if (k)
+            busy_wait(100);
+        got = get_desc(1, 0, 64);
+    }
+    if (got < 8)
         return -1;
     g_u.mps0 = g_cbuf[7] ? g_cbuf[7] : 8;
+    g_u.step = "SET_ADDRESS";
     if (control(0x00, 5, 1, 0, 0) < 0) /* SET_ADDRESS 1 */
         return -1;
     busy_wait(10);
+    g_u.step = "device descriptor at address 1";
     g_ed_ctrl.ctrl = ED_SKIP | (g_u.lowspeed ? ED_LOWSPEED : 0) | ((uint32_t)g_u.mps0 << 16) | 1u;
     if (get_desc(1, 0, 18) < 18)
         return -1;
+    g_u.step = "configuration descriptor";
     g_u.vid = (uint16_t)(g_cbuf[8] | (g_cbuf[9] << 8));
     g_u.pid = (uint16_t)(g_cbuf[10] | (g_cbuf[11] << 8));
     const uint8_t iproduct = g_cbuf[15];
@@ -215,7 +230,7 @@ static int enumerate(void) {
     uint16_t total = (uint16_t)(g_cbuf[2] | (g_cbuf[3] << 8));
     if (total > sizeof(g_cbuf))
         total = sizeof(g_cbuf);
-    const int got = get_desc(2, 0, total);
+    got = get_desc(2, 0, total);
     if (got < 9)
         return -1;
     g_u.cfg_len = (uint16_t)got;
@@ -248,6 +263,7 @@ static int enumerate(void) {
         }
     }
     get_string(iproduct, g_u.product, sizeof(g_u.product));
+    g_u.step = "SET_CONFIGURATION";
     if (control(0x00, 9, g_u.cfg, 0, 0) < 0) /* SET_CONFIGURATION */
         return -1;
     if (alt && control(0x01, 11, alt, g_u.iface, 0) < 0) /* SET_INTERFACE */
@@ -367,16 +383,25 @@ void usbh_poll(void) {
             R(HC_RHPORT1) = PS_PRS;
             g_u.state = ST_RESET;
             g_u.t0 = now_samples();
+            g_u.resets = 1;
         }
         break;
     case ST_RESET:
-        if ((ps & PS_PRSC) && ms_since(g_u.t0) >= 20) {
-            R(HC_RHPORT1) = PS_PRSC | PS_CSC | PS_PESC;
+        if (ps & PS_PRSC) {
+            R(HC_RHPORT1) = PS_PRSC;
+            if (ms_since(g_u.t0) < 50) { /* at least the root-port 50 ms (high-speed devices finish their
+                                            chirp in it): repeat a shorter controller reset, as Linux does */
+                R(HC_RHPORT1) = PS_PRS;
+                ++g_u.resets;
+                break;
+            }
+            R(HC_RHPORT1) = PS_CSC | PS_PESC;
             g_u.lowspeed = (ps & PS_LSDA) != 0;
             busy_wait(10);
             if (enumerate() == 0)
                 g_u.state = ST_RUN;
             else {
+                printf("USB: enumeration failed at the %s (reset %d x)\n", g_u.step, g_u.resets);
                 g_u.state = ST_FAIL;
                 g_u.t0 = now_samples();
             }
@@ -391,6 +416,7 @@ void usbh_poll(void) {
             R(HC_RHPORT1) = PS_PRS;
             g_u.state = ST_RESET;
             g_u.t0 = now_samples();
+            g_u.resets = 1;
         }
         break;
     case ST_RUN: {
@@ -434,6 +460,8 @@ void usbh_status(void) {
            (ps & PS_CCS) ? ((ps & PS_LSDA) ? ", low speed" : ", full speed") : "");
     if (g_u.state == ST_RUN)
         printf("  %04x:%04x \"%s\" EP%u", g_u.vid, g_u.pid, g_u.product, g_u.in_ep & 0xF);
+    else if (g_u.state == ST_FAIL && g_u.step)
+        printf("  at the %s", g_u.step);
     printf("\n     attaches %lu (bounced %lu)  packets %lu  midi messages %lu  errors %lu\n",
            (unsigned long)g_u.attaches, (unsigned long)g_u.bounces, (unsigned long)g_u.packets,
            (unsigned long)g_u.msgs, (unsigned long)g_u.errors);
