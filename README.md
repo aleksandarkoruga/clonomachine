@@ -91,12 +91,22 @@ pitch gate interval amp overlap randPos randomPitch prob separation maxGrains te
 bgAdvance envHold pvTransient; mod wheel = grains / time stretcher, aftertouch = grainDur,
 pitch bend = cutter handover (voice 0) / noteMode. Other channels use the Monomachine table.
 
-- **Clock:** the global bpm follows MIDI clock (4-beat window, 0.1 bpm steps); `clock 0`
-  turns that off. **Start** restarts the beat and every background playhead, **Stop**
+- **Clock:** the global bpm follows MIDI clock (least-squares slope over the last 96 ticks,
+  ticks the cable lost counted in from the interval, 0.1 bpm steps); `clock 0` turns that off. **Start** restarts the beat and every background playhead, **Stop**
   closes every gate, **Continue** changes nothing.
 - The Elektron TM-1 does not come up on US2 (it reboots: US2 seems to give it too little 5 V);
   TurboMIDI from the Machinedrum can't be read by a plain cable (set the MD to 1x).
-- Console: `usb`, `usbdesc`, `midimon 1`, `midimap [reload]`, `midiin <st> <d1> <d2>` (hex).
+- **Note-off closes the gate:** a short note length on the sending track (MD MID machine LEN)
+  gives clicks.
+- **CH345 cables:** running-status messages arrive without their status byte (the firmware puts
+  it back), and the input is not opto-isolated: with the board's audio going into the
+  Machinedrum it drops out for 40-400 ms whenever the board plays (notes in the gap are lost).
+  An isolated MIDI input fixes that (audio isolation transformer, an opto-isolated interface,
+  or a DIN opto input on a GPIO).
+- The host keeps 8 IN transfers queued and also collects them inside SD reads (time-stamped),
+  so loading banks doesn't drop or delay-stamp MIDI.
+- Console: `usb`, `usbdesc`, `midimon 1` (decoded) / `2` (raw, timestamped) / `3` (raw incl.
+  clock), `midimap [reload]`, `midiin <st> <d1> <d2>` (hex).
 
 ## Behaviour notes (design decisions)
 
