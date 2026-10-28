@@ -1,5 +1,7 @@
 // ESP32 pass-through for the ULX3S: the FT231X UART on US1 goes straight to the on-board ESP32,
-// and DTR / RTS give esptool its reset and boot-mode sequence. For programming or reading the
+// and DTR / RTS are meant to give esptool its reset and boot-mode sequence. On the v3.0.8 board
+// (2026-10-28) neither F1 (EN) nor L2 (GPIO0) has any effect: GPIO0 follows the FT231X RTS
+// line directly and nothing on the PC side resets the ESP32 -- see host/esp32/README. For programming or reading the
 // ESP32 only: loaded into SRAM (host/esp32/esp.sh), the sampler comes back at the next power-up
 // or when its bitstream is loaded again. The SD card pins are left alone (inputs).
 module esp32_passthru (

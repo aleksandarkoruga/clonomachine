@@ -9,6 +9,11 @@ import sys
 
 import pyftdi.serialext  # noqa: F401  registers ftdi:// URLs with pyserial
 import esptool
+import esptool.loader
+
+# the "tight" reset drives DTR/RTS with ioctls on a tty file descriptor, which a pyftdi port
+# doesn't have: the classic DTR/RTS sequence does the same through pyserial
+esptool.loader.UnixTightReset = esptool.loader.ClassicReset
 
 URL = "ftdi://ftdi:0x6015/1"
 

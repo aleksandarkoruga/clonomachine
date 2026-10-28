@@ -1,0 +1,19 @@
+On-board ESP32 of the ULX3S v3.0.8 (read 2026-10-28 through passthru.v):
+  ESP32 with PSRAM ("ESP32 module (spiram)", ~4 MB heap), 4 MB flash, MicroPython v1.14
+  (2021-02-02) with only the default boot.py, CPU at 160 MHz, unique id c88541c9c368.
+
+Tools here:
+  esp.sh <esptool args>   builds/loads the pass-through into the FPGA's SRAM, runs esptool
+  esptool_ftdi.py         esptool over pyftdi (the FT231X is in bit-bang mode after
+                          openFPGALoader); classic DTR/RTS reset instead of the tty-only one
+  boot_log.py             reset + print what the ESP32 says at 115200
+
+Reset / download mode on this board: the FPGA pins wifi_en (F1) and wifi_gpio0 (L2) do nothing
+(driven low: no reset, GPIO0 still reads 1). GPIO0 follows the FT231X RTS line directly
+(pyserial rts=True -> GPIO0 low), DTR does nothing, so esptool's auto-reset can't work and a
+software restart (machine.reset) doesn't re-read GPIO0. Talking to MicroPython works (REPL at
+115200 through the pass-through). To flash: hold RTS (GPIO0 low) over a real power-on reset of
+the ESP32 (untested idea: the FPGA's shutdown pin G16 + the PWR button, with the FT231X staying
+powered from USB), then esptool --before no_reset; after that, updates over WiFi (OTA).
+The sampler keeps the SD card; the ESP32 firmware must never touch the SD pins (GPIO2/4/12/13/
+14/15) nor GPIO16/17 (PSRAM).
