@@ -7,15 +7,16 @@
  *     "clockFollow": true,
  *     "pages": [
  *       { "channel": 5, "voice": 0, "cc": 16, "rate": [0, 4],
- *         "knobs": ["bufNum", "bank", "rate", "pitch", "gate", "interval", "amp", ...],
- *         "mw": "algo", "at": "grainDur", "pb": "cutter" },
+ *         "knobs": ["bufNum", "rate", "pitch", "gate", "interval", "fxSend", "repeats", ...],
+ *         "velocity": "amp", "mw": "algo", "at": "grainDur", "pb": "bank" },
  *       ...
  *     ]
  *   }
  *
  * channel: 1..16 as the instrument shows it. voice: 0 drums, 1 melody, 2 third voice.
  * cc: the first CC of the page; the knobs follow on consecutive CCs. rate: the rate knob's
- * range (63 = 1). mw / at / pb: what the mod wheel, channel aftertouch and pitch bend do.
+ * range (63 = 1). velocity / mw / at / pb: what a note's velocity, the mod wheel, channel
+ * aftertouch and pitch bend do (pitch bend: its coarse 7 bits, all the Machinedrum sends).
  */
 #ifndef MIDIMAP_H
 #define MIDIMAP_H
@@ -29,14 +30,14 @@
 enum {
     MT_NONE, MT_BUFNUM, MT_BANK, MT_RATE, MT_PITCH, MT_GATE, MT_INTERVAL, MT_AMP, MT_OVERLAP, MT_RANDPOS,
     MT_RANDOMPITCH, MT_PROB, MT_SEPARATION, MT_MAXGRAINS, MT_TEMPOLOCK, MT_BGADVANCE, MT_ENVHOLD,
-    MT_PVTRANSIENT, MT_ALGO, MT_GRAINDUR, MT_NOTEMODE, MT_OUT, MT_CUTTER, MT_NUM
+    MT_PVTRANSIENT, MT_ALGO, MT_GRAINDUR, MT_NOTEMODE, MT_OUT, MT_CUTTER, MT_REPEATS, MT_FXSEND, MT_NUM
 };
 extern const char* const mm_target_names[MT_NUM];
 
 struct mm_page {
     uint8_t chan;               /* 0-based MIDI channel                    */
     uint8_t voice, cc, nknobs;
-    uint8_t mw, at, pb;         /* MT_* targets                             */
+    uint8_t mw, at, pb, vel;    /* MT_* targets (vel: note-on velocity)     */
     uint8_t knobs[MM_MAX_KNOBS];
     int32_t rate_lo, rate_hi;   /* Q16                                      */
 };

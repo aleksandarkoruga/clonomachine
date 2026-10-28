@@ -292,6 +292,12 @@ void slot_select_bank(int s, int bank) {
     try_switch(s);
 }
 
+/* a 7-bit control over all of the slot's banks: the whole range reaches every one */
+void slot_select_bank_frac(int s, int v) {
+    const int nb = g_libs[slot_lib(s)].nbanks;
+    slot_select_bank(s, nb > 0 ? (v < 0 ? 0 : v > 127 ? 127 : v) * nb / 128 : 0);
+}
+
 void slots_service(void) {
     int busy = 0;
     for (int s = 0; s < NUM_SLOTS; ++s) {
@@ -342,7 +348,7 @@ static int32_t fmod_i(int32_t a, int32_t n) {
     return m < 0 ? m + n : m; /* SC % is a floored modulo */
 }
 
-void slot_note_on(int s, int note, int vel) {
+void slot_note_on(int s, int note, int repeats) {
     struct slot* sl = &g_slots[s];
     const int32_t n16 = (int32_t)slot_sixteenths(s);
     const int32_t m = fmod_i(note - 12, n16);
@@ -370,7 +376,8 @@ void slot_note_on(int s, int note, int vel) {
         }
         sl->pos_q30 = (uint32_t)(((uint64_t)p << 30) / smp->frames);
     }
-    sl->repeats = vel - 1;
+    if (repeats >= 0)
+        sl->repeats = repeats;
     if (sl->pos_pin) { /* as in SC: Latch(pos, trig), the playhead runs from there */
         sl->pos_pin = 0;
         slot_apply_flags(s);

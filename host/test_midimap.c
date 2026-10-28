@@ -31,6 +31,10 @@ int main(void) {
           b.page[0].knobs[2] == MT_GATE);
     CHECK(b.page[0].mw == MT_NONE && b.page[0].at == MT_GRAINDUR && b.page[0].pb == MT_OUT);
     CHECK(b.clock_follow == 0);
+    CHECK(b.page[0].vel == MT_AMP); /* a file without "velocity": the volume */
+    const char* vel = "{ \"pages\": [ {\"channel\": 5, \"velocity\": \"repeats\", \"knobs\": [\"fxSend\"]} ] }";
+    CHECK(midimap_parse(&b, vel, (int)strlen(vel), err, sizeof(err)) == 0);
+    CHECK(b.page[0].vel == MT_REPEATS && b.page[0].knobs[0] == MT_FXSEND && b.page[0].pb == MT_BANK);
 
     const char* bad1 = "{ \"pages\": [ {\"channel\": 5, \"knobs\": [\"wobble\"]} ] }";
     CHECK(midimap_parse(&b, bad1, (int)strlen(bad1), err, sizeof(err)) != 0);

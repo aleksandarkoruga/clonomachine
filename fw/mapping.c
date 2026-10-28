@@ -159,7 +159,7 @@ void mapping_event(const struct smp_event* e) {
             if (e->b == 0)
                 slot_note_off(s);   /* running-status note-off */
             else
-                slot_note_on(s, e->a, e->b);
+                slot_note_on(s, e->a, e->b - 1); /* velocity - 1 = stutter repeats */
         }
         break;
     case EV_NOTE_OFF:
@@ -213,7 +213,8 @@ void mapping_event(const struct smp_event* e) {
 /* ---- USB MIDI pages: /midimap.json on the SD card (fw/midimap.h) -------------------------
  * A page = one MIDI channel driving one voice: consecutive CCs from the page's first one
  * drive its knobs, mod wheel / aftertouch / pitch bend their targets, notes trigger (16ths of
- * the loop / transients, velocity - 1 = stutter repeats), a note-off ends the gate (only for
+ * the loop / transients; the velocity drives the page's "velocity" control, the volume by
+ * default), a note-off ends the gate (only for
  * the note that plays). Other channels go through the Monomachine table of mapping_event. */
 static struct midimap g_mm;
 static struct {
@@ -280,7 +281,7 @@ static void apply(int pi, int t, int v) {
         return;
     switch (t) {
     case MT_BUFNUM: raw_param(s, P_BUFNUM, v); break;
-    case MT_BANK: raw_param(s, P_BANK, v); break;
+    case MT_BANK: slot_select_bank_frac(s, v); break; /* the 128 steps reach every bank */
     case MT_RATE: raw_param(s, P_RATE, g_pg[pi].lut_rate[v]); break;
     case MT_PITCH: raw_param(s, P_PITCH, lut_pitch[v]); break;
     case MT_GATE: raw_param(s, P_ENVBARS, (v + 1) * 2048); break;                 /* (cc+1)/32 bar */
@@ -300,6 +301,8 @@ static void apply(int pi, int t, int v) {
     case MT_GRAINDUR: raw_param(s, P_GRAINDUR, lut_graindur_at[v]); break;
     case MT_NOTEMODE: raw_param(s, P_NOTEMODE, v * 3 / 128); break;
     case MT_OUT: raw_param(s, P_OUT, v * 3 / 128); break;
+    case MT_REPEATS: raw_param(s, P_REPEATS, v > 126 ? 126 : v); break;
+    case MT_FXSEND: break; /* reverb send: not in the gateware yet */
     default: break;
     }
 }
@@ -434,7 +437,8 @@ void mapping_midi_at(uint8_t st, uint8_t d1, uint8_t d2, uint32_t t) {
         if (d2) {
             if (!ext) {
                 g_pg[pi].last_note = d1;
-                slot_note_on(s, d1, d2);
+                apply(pi, pg->vel, d2); /* velocity: volume by default */
+                slot_note_on(s, d1, -1);
             }
             break;
         }
