@@ -260,6 +260,12 @@ static void route_byte(uint8_t c, int in_loader) {
     text_byte(c);
 }
 
+/* samples_drain_hook: inside SD sector reads, buffer only (UART input, USB-MIDI events) */
+static void io_drain(void) {
+    console_drain();
+    usbh_service();
+}
+
 /* samples_idle_hook: called by the loader between slices of work */
 static void console_pump(void) {
     console_drain();
@@ -326,7 +332,7 @@ int main(void) {
     mapping_midimap_load();
     usbh_init();
     samples_idle_hook = console_pump;  /* loader slices: dispatch events */
-    samples_drain_hook = console_drain; /* inside SD reads: buffer only */
+    samples_drain_hook = io_drain;      /* inside SD reads: buffer only */
     for (;;) {
         console_drain();
         while (g_text_r != g_text_w) {

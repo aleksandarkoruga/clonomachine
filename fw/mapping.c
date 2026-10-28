@@ -321,21 +321,59 @@ static void md_set_external(int on) {
 }
 
 /* MIDI clock: tempo over the last 96 ticks (4 beats), applied when it moves by > 0.1 bpm */
-static uint32_t g_clk_ring[128], g_clk_n, g_clk_last, g_clock_bpm_milli;
+static uint32_t g_clk_ring[128], g_clk_x[128], g_clk_dt[15], g_clk_n, g_clk_last, g_clock_bpm_milli;
 
-static void clock_tick(void) {
-    const uint32_t t = eng_status(SMP_SG_SAMPLES);
+/* t: when the tick arrived (engine samples). Every tick gets its index in the stream: one more
+   than the last, plus the ticks the interface lost in between (a cheap non-isolated cable drops
+   out while the board's audio plays), counted from the interval with the median of the last 15
+   intervals as the period. Once a beat the tempo is the least-squares slope of arrival time over
+   index for the last 96 ticks: missing ticks don't slow it down, and a tick that was picked up a
+   few ms late (USB serviced between SD reads) hardly moves it. */
+static void clock_tick(uint32_t t) {
     if (g_clk_n && t - g_clk_last > 48000) /* a gap of more than 1 s: start over */
         g_clk_n = 0;
-    g_clk_last = t;
     const uint32_t n = g_clk_n++;
+    uint32_t x = 0;
+    if (n) {
+        const uint32_t dt = t - g_clk_last;
+        g_clk_dt[(n - 1) % 15] = dt;
+        x = g_clk_x[(n - 1) & 127] + 1;
+        if (n >= 15) {
+            uint32_t m[15];
+            for (int i = 0; i < 15; ++i) { /* insertion sort */
+                int j = i;
+                for (; j > 0 && m[j - 1] > g_clk_dt[i]; --j)
+                    m[j] = m[j - 1];
+                m[j] = g_clk_dt[i];
+            }
+            const uint32_t per = m[7];
+            const uint32_t k = per ? (dt + per / 2) / per : 1;
+            if (k > 1)
+                x += k - 1;
+        }
+    }
+    g_clk_last = t;
     g_clk_ring[n & 127] = t;
-    if (n < 96 || n % 24)
+    g_clk_x[n & 127] = x;
+    if (n < 47 || (n + 1) % 24)
         return;
-    const uint32_t dt = t - g_clk_ring[(n - 96) & 127];
-    if (!dt)
+    const uint32_t m = n + 1 < 96 ? n + 1 : 96, i0 = n + 1 - m;
+    const uint32_t x0 = g_clk_x[i0 & 127], t0 = g_clk_ring[i0 & 127];
+    int64_t sx = 0, sy = 0, sxx = 0, sxy = 0;
+    for (uint32_t i = i0; i <= n; ++i) {
+        const int64_t xi = g_clk_x[i & 127] - x0, yi = g_clk_ring[i & 127] - t0;
+        sx += xi;
+        sy += yi;
+        sxx += xi * xi;
+        sxy += xi * yi;
+    }
+    const int64_t den = (int64_t)m * sxx - sx * sx, num = (int64_t)m * sxy - sx * sy;
+    if (den <= 0 || num <= 0)
         return;
-    uint32_t bpm = (uint32_t)((((uint64_t)240000 * eng_fs_q16()) / dt) >> 16); /* 4 beats in dt */
+    const uint64_t per_q16 = ((uint64_t)num << 16) / (uint64_t)den; /* samples per tick */
+    if (!per_q16)
+        return;
+    uint32_t bpm = (uint32_t)((uint64_t)2500 * eng_fs_q16() / per_q16); /* 60 fs / 24 per, milli */
     bpm = (bpm + 5) / 10 * 10;
     g_clock_bpm_milli = bpm;
     const int32_t d = (int32_t)(bpm - g_bpm_milli);
@@ -344,11 +382,15 @@ static void clock_tick(void) {
 }
 
 void mapping_midi(uint8_t st, uint8_t d1, uint8_t d2) {
+    mapping_midi_at(st, d1, d2, eng_status(SMP_SG_SAMPLES));
+}
+
+void mapping_midi_at(uint8_t st, uint8_t d1, uint8_t d2, uint32_t t) {
     ++g_midi_count;
     struct smp_event e = {0};
     if (st >= 0xF8) { /* realtime */
         if (st == 0xF8)
-            clock_tick();
+            clock_tick(t);
         else if (st == 0xFA) { /* start: beat and wall clock from zero */
             g_clk_n = 0;
             e.type = EV_START;

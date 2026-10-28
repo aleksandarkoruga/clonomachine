@@ -6,8 +6,12 @@
  * to invalidate the data cache before reading what the controller wrote.
  *
  * Attach -> 100 ms debounce -> port reset -> enumeration (address 1, configuration, the
- * MIDIStreaming interface's bulk IN endpoint) -> one 64-byte IN transfer always queued;
- * the controller retries NAKs by itself, usbh_poll() parses whatever came in and requeues.
+ * MIDIStreaming interface's bulk IN endpoint) -> NBTD IN transfers always queued, so the
+ * controller goes on reading while the CPU is busy elsewhere (cheap interfaces like the CH345
+ * hold one event and drop the next one if nobody reads in time: half the clock ticks at
+ * 173 bpm with one transfer queued). usbh_service() retires finished transfers into an event
+ * ring with their arrival time and requeues them; it only copies, so it also runs inside SD
+ * reads. usbh_poll() hands the events to mapping_midi_at().
  */
 #include "usbh.h"
 
@@ -71,21 +75,26 @@ static uint8_t g_hcca[256] __attribute__((aligned(256)));
 static struct ed g_ed_ctrl __attribute__((aligned(16)));
 static struct ed g_ed_bulk __attribute__((aligned(16)));
 static struct td g_td[4] __attribute__((aligned(16)));      /* control: setup, data, status, dummy */
-static struct td g_btd[2] __attribute__((aligned(16)));     /* bulk IN: active + dummy, swapped     */
+#define NBTD 8
+static struct td g_btd[NBTD + 1] __attribute__((aligned(16))); /* bulk IN ring: NBTD queued + dummy */
 static uint8_t g_setup[8] __attribute__((aligned(4)));
 static uint8_t g_cbuf[512] __attribute__((aligned(4)));     /* control data (config descriptor)   */
-static uint8_t g_bbuf[2][64] __attribute__((aligned(4)));   /* bulk IN buffers, one per TD          */
+static uint8_t g_bbuf[NBTD + 1][64] __attribute__((aligned(4))); /* bulk IN buffers, one per TD      */
+static struct { uint32_t t; uint8_t b[4]; } g_ev[256];          /* events in arrival order          */
+static uint32_t g_ev_r, g_ev_w;
 
 enum { ST_OFF, ST_IDLE, ST_DEBOUNCE, ST_RESET, ST_RUN, ST_FAIL };
 static const char* const g_st_name[] = {"no controller", "waiting for a device", "debounce", "port reset",
                                         "running", "enumeration failed"};
 static struct {
-    int state, lowspeed, active;          /* active: index of the bulk TD the controller owns */
+    int state, lowspeed;
+    int bhead, btail;                     /* bulk ring: oldest queued TD, the dummy at the tail */
+    uint8_t running;                      /* running status (the CH345 leaves it out)          */
     uint32_t t0;                          /* state entry time, samples                         */
     uint16_t vid, pid, mps0, in_mps;
     uint8_t in_ep, out_ep, iface, cfg, cls;
     char product[40];
-    uint32_t msgs, packets, errors, attaches, bounces;
+    uint32_t msgs, packets, errors, attaches, bounces, ev_drops, ring_max;
     uint32_t cc_count[16];                /* bulk-IN errors per OHCI condition code */
     uint16_t cfg_len;
     int resets;                           /* controller port resets in the last port reset          */
@@ -185,18 +194,20 @@ static void get_string(uint8_t index, char* out, int n) {
     out[k] = 0;
 }
 
-/* Bulk IN: TD a is queued, b is the dummy at the tail. */
-static void bulk_queue(int a) {
+static inline int bnext(int i) { return i == NBTD ? 0 : i + 1; }
+
+/* Bulk IN: the dummy at the tail becomes a transfer, the free TD after it the new dummy. */
+static void bulk_append(void) {
+    const int a = g_u.btail, d = bnext(a);
     struct td* t = &g_btd[a];
-    struct td* d = &g_btd[a ^ 1];
-    memset((void*)d, 0, sizeof(*d));
+    memset((void*)&g_btd[d], 0, sizeof(struct td));
     t->ctrl = TD_CC_NA | TD_IN | TD_NOINT | TD_ROUND; /* toggle from the ED */
     t->cbp = ptr(g_bbuf[a]);
     t->be = ptr(g_bbuf[a]) + g_u.in_mps - 1;
-    t->next = ptr(d);
-    g_ed_bulk.tailp = ptr(d);
+    t->next = ptr(&g_btd[d]);
     mb();
-    R(HC_CMDSTATUS) = CMD_BLF;
+    g_ed_bulk.tailp = ptr(&g_btd[d]);
+    g_u.btail = d;
 }
 
 static int enumerate(void) {
@@ -278,47 +289,107 @@ static int enumerate(void) {
     g_ed_bulk.ctrl = (g_u.lowspeed ? ED_LOWSPEED : 0) | ((uint32_t)g_u.in_mps << 16) | ((uint32_t)(in_ep & 0xF) << 7) | 1u;
     memset((void*)g_btd, 0, sizeof(g_btd));
     g_ed_bulk.headp = ptr(&g_btd[0]); /* toggle carry 0 (DATA0) */
-    g_u.active = 0;
-    bulk_queue(0);
+    g_ed_bulk.tailp = ptr(&g_btd[0]);
+    g_u.bhead = g_u.btail = 0;
+    g_u.running = 0;
+    g_ev_r = g_ev_w = 0;
+    for (int i = 0; i < NBTD; ++i)
+        bulk_append();
+    R(HC_CMDSTATUS) = CMD_BLF;
     printf("USB: %04x:%04x \"%s\", MIDI in on EP%u (%s interface %u, %u-byte packets)\n", g_u.vid, g_u.pid,
            g_u.product, in_ep & 0xF, g_u.cls == 1 ? "MIDIStreaming" : "vendor", g_u.iface, g_u.in_mps);
     return 0;
 }
 
-/* midimon 2/3: the packet as it came off the bus (2 leaves out packets that are only clocks) */
-static void dump_raw(const uint8_t* p, int n) {
-    int clocks_only = 1;
-    for (int i = 0; i + 4 <= n; i += 4)
-        if ((p[i] | p[i + 1] | p[i + 2] | p[i + 3]) && !(p[i] == 0x0F && p[i + 1] == 0xF8))
-            clocks_only = 0;
-    if (clocks_only && g_midi_monitor < 3)
+/* One USB-MIDI event packet [cable << 4 | CIN, MIDI bytes] that arrived at t. The CH345
+   (1a86:752d) sends a running-status message without its status byte (09 00 01 00 after
+   09 94 00 00) and puts a clock that came inside it in a data slot (09 10 f8 00): the status
+   comes back from the last one seen, the clock is taken out. */
+static void event(const uint8_t* p, uint32_t t) {
+    const uint8_t cin = p[0] & 0xF;
+    if (g_midi_monitor >= 2 && (g_midi_monitor >= 3 || p[1] != 0xF8))
+        printf("[usb %6lu.%lu ms  %02x %02x %02x %02x]\n", (unsigned long)(t / 48), (unsigned long)(t % 48 * 10 / 48),
+               p[0], p[1], p[2], p[3]);
+    uint8_t st = p[1], d1 = p[2], d2 = p[3];
+    if (st >= 0xF8) { /* realtime, whatever the CIN */
+        d1 = d2 = 0;
+    } else if (cin >= 0x8 && cin <= 0xE) {
+        if (st < 0x80) { /* running status */
+            if (!g_u.running)
+                return;
+            uint8_t d[3];
+            int k = 0;
+            for (int i = 1; i < 4; ++i) {
+                if (p[i] >= 0xF8) {
+                    ++g_u.msgs;
+                    mapping_midi_at(p[i], 0, 0, t);
+                } else if (p[i] >= 0x80)
+                    return;
+                else
+                    d[k++] = p[i];
+            }
+            st = g_u.running;
+            d1 = d[0];
+            d2 = (k > 1 && (st & 0xE0) != 0xC0) ? d[1] : 0; /* program change / channel pressure: one byte */
+        } else
+            g_u.running = st;
+        if (cin == 0xC || cin == 0xD)
+            d2 = 0;
+    } else { /* sysex, system common: they end running status */
+        g_u.running = 0;
         return;
-    printf("[usb %2d:", n);
-    for (int i = 0; i < n; ++i)
-        printf((i & 3) ? " %02x" : "  %02x", p[i]);
-    puts("]");
+    }
+    ++g_u.msgs;
+    if (g_midi_monitor == 1 && st != 0xF8)
+        printf("[midi %02x %3u %3u  ch %u]\n", st, d1, d2, (st & 0xF) + 1);
+    mapping_midi_at(st, d1, d2, t);
 }
 
-/* USB-MIDI event packets: [cable << 4 | CIN, MIDI bytes...] */
-static void parse(const uint8_t* p, int n) {
-    if (g_midi_monitor >= 2)
-        dump_raw(p, n);
-    for (int i = 0; i + 4 <= n; i += 4, p += 4) {
-        const uint8_t cin = p[0] & 0xF;
-        if (!(p[0] | p[1] | p[2] | p[3]))
-            continue; /* padding */
-        uint8_t st = p[1], d1 = p[2], d2 = p[3];
-        switch (cin) {
-        case 0x8: case 0x9: case 0xA: case 0xB: case 0xE: break;
-        case 0xC: case 0xD: d2 = 0; break;
-        case 0xF: d1 = d2 = 0; break; /* single byte: clock, start, stop ... */
-        default: continue;            /* sysex, system common */
+void usbh_service(void) {
+    if (g_u.state != ST_RUN)
+        return;
+    R(HC_INTSTATUS) = 2u; /* WritebackDoneHead: let the controller report again */
+    flush_cpu_dcache();
+    const uint32_t h = g_ed_bulk.headp, hp = h & ~0xFu;
+    const uint32_t t = now_samples();
+    int done = 0;
+    for (;;) {
+        const int a = g_u.bhead;
+        if (a == g_u.btail)
+            break;
+        const struct td* td = &g_btd[a];
+        const uint32_t cc = TD_CC(td->ctrl);
+        /* retired: the controller moved past it, or it halted the endpoint on it */
+        if (ptr(td) == hp && !((h & 1) && cc != 15))
+            break;
+        if (cc == 0 || cc == 9) {
+            ++g_u.packets;
+            const int n = td->cbp ? (int)(td->cbp - ptr(g_bbuf[a])) : g_u.in_mps;
+            for (int i = 0; i + 4 <= n; i += 4) {
+                const uint8_t* e = &g_bbuf[a][i];
+                if (!(e[0] | e[1] | e[2] | e[3]))
+                    continue; /* padding */
+                if (g_ev_w - g_ev_r >= 256) {
+                    ++g_u.ev_drops;
+                    continue;
+                }
+                g_ev[g_ev_w & 255].t = t;
+                memcpy(g_ev[g_ev_w & 255].b, e, 4);
+                ++g_ev_w;
+            }
+        } else {
+            ++g_u.errors;
+            ++g_u.cc_count[cc & 15];
         }
-        ++g_u.msgs;
-        if (g_midi_monitor == 1 && st != 0xF8)
-            printf("[midi %02x %3u %3u  ch %u]\n", st, d1, d2, (st & 0xF) + 1);
-        mapping_midi(st, d1, d2);
+        g_u.bhead = bnext(a);
+        bulk_append();
+        ++done;
     }
+    if (h & 1) /* halted on an error: go on after the failed transfer, keep the toggle */
+        g_ed_bulk.headp = ptr(&g_btd[g_u.bhead]) | (h & 2);
+    if (done > (int)g_u.ring_max)
+        g_u.ring_max = (uint32_t)done;
+    R(HC_CMDSTATUS) = CMD_BLF; /* keep the bulk list going */
 }
 
 void usbh_init(void) {
@@ -419,36 +490,13 @@ void usbh_poll(void) {
             g_u.resets = 1;
         }
         break;
-    case ST_RUN: {
-        R(HC_INTSTATUS) = 2u; /* WritebackDoneHead: let the controller report again */
-        flush_cpu_dcache();
-        const uint32_t h = g_ed_bulk.headp;
-        const struct td* t = &g_btd[g_u.active];
-        if (h & 1) { /* halted: drop the TD, carry on */
-            ++g_u.errors;
-            ++g_u.cc_count[TD_CC(t->ctrl) & 15];
-            g_ed_bulk.headp = ptr(&g_btd[g_u.active ^ 1]) | (h & 2);
-            g_u.active ^= 1;
-            bulk_queue(g_u.active);
-            break;
+    case ST_RUN:
+        usbh_service();
+        while (g_ev_r != g_ev_w) {
+            const uint32_t i = g_ev_r++ & 255;
+            event(g_ev[i].b, g_ev[i].t);
         }
-        if ((h & ~0xFu) != ptr(&g_btd[g_u.active ^ 1])) {
-            R(HC_CMDSTATUS) = CMD_BLF; /* still pending (NAKs): keep the bulk list going */
-            break;
-        }
-        const int a = g_u.active;
-        const int n = t->cbp ? (int)(t->cbp - ptr(g_bbuf[a])) : g_u.in_mps;
-        if (TD_CC(t->ctrl) == 0 || TD_CC(t->ctrl) == 9) {
-            ++g_u.packets;
-            parse(g_bbuf[a], n);
-        } else {
-            ++g_u.errors;
-            ++g_u.cc_count[TD_CC(t->ctrl) & 15];
-        }
-        g_u.active ^= 1;
-        bulk_queue(g_u.active);
         break;
-    }
     default:
         break;
     }
@@ -462,9 +510,11 @@ void usbh_status(void) {
         printf("  %04x:%04x \"%s\" EP%u", g_u.vid, g_u.pid, g_u.product, g_u.in_ep & 0xF);
     else if (g_u.state == ST_FAIL && g_u.step)
         printf("  at the %s", g_u.step);
-    printf("\n     attaches %lu (bounced %lu)  packets %lu  midi messages %lu  errors %lu\n",
+    printf("\n     attaches %lu (bounced %lu)  packets %lu  midi messages %lu  errors %lu"
+           "  (most transfers finished at once %lu of %d, events dropped %lu)\n",
            (unsigned long)g_u.attaches, (unsigned long)g_u.bounces, (unsigned long)g_u.packets,
-           (unsigned long)g_u.msgs, (unsigned long)g_u.errors);
+           (unsigned long)g_u.msgs, (unsigned long)g_u.errors, (unsigned long)g_u.ring_max, NBTD,
+           (unsigned long)g_u.ev_drops);
     static const char* const cc_name[16] = {"ok", "CRC", "bit stuffing", "toggle mismatch", "stall",
         "no response", "PID check", "unexpected PID", "data overrun", "data underrun", "?", "?",
         "buffer overrun", "buffer underrun", "not accessed", "not accessed"};
@@ -484,10 +534,10 @@ void usbh_debug(void) {
     printf("bulk ED %08lx: ctrl %08lx tail %08lx head %08lx next %08lx\n", (unsigned long)ptr(&g_ed_bulk),
            (unsigned long)g_ed_bulk.ctrl, (unsigned long)g_ed_bulk.tailp, (unsigned long)g_ed_bulk.headp,
            (unsigned long)g_ed_bulk.next);
-    for (int i = 0; i < 2; ++i)
+    for (int i = 0; i <= NBTD; ++i)
         printf("TD%d %08lx: ctrl %08lx cbp %08lx next %08lx be %08lx%s\n", i, (unsigned long)ptr(&g_btd[i]),
                (unsigned long)g_btd[i].ctrl, (unsigned long)g_btd[i].cbp, (unsigned long)g_btd[i].next,
-               (unsigned long)g_btd[i].be, i == g_u.active ? "  (active)" : "");
+               (unsigned long)g_btd[i].be, i == g_u.bhead ? "  (oldest)" : i == g_u.btail ? "  (dummy)" : "");
 }
 
 /* Debug: sample the port's connect bit for ms milliseconds, print how long each connection
@@ -529,6 +579,7 @@ void usbh_descriptors(void) {
 #else
 void usbh_init(void) {}
 void usbh_poll(void) {}
+void usbh_service(void) {}
 void usbh_status(void) { printf("usb: no USB host in this gateware\n"); }
 void usbh_descriptors(void) {}
 void usbh_set_pull(int mode) { (void)mode; }

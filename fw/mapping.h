@@ -10,6 +10,7 @@ void mapping_event(const struct smp_event* e);
    voices; other channels go through the Monomachine table of mapping_event(); MIDI clock
    sets the tempo (g_clock_follow). */
 void mapping_midi(uint8_t status, uint8_t d1, uint8_t d2);
+void mapping_midi_at(uint8_t status, uint8_t d1, uint8_t d2, uint32_t t); /* t: arrival (engine samples), for the clock */
 void mapping_midi_status(void);
 void mapping_midimap_load(void);     /* /midimap.json; written with the defaults if missing */
 void mapping_midimap_print(void);

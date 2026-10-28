@@ -8,6 +8,7 @@
 
 void usbh_init(void);
 void usbh_poll(void);            /* main loop / loader idle: attach, enumerate, MIDI in */
+void usbh_service(void);         /* anywhere, also inside SD reads: collect + requeue    */
 void usbh_status(void);          /* console: state, device, counters                   */
 void usbh_descriptors(void);     /* console: dump the device's descriptors              */
 void usbh_set_pull(int mode);    /* US2 resistors: 0 pull-downs (host), 1 released      */
