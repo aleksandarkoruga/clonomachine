@@ -102,7 +102,7 @@ static void help(void) {
          "trig <slot> [pos] | note <slot> <note> [vel] | set <slot> <param> <value> | gatetest <slot>\n"
          "dsm <0|1> | norm <0|1> | verbose <0|1> | reset\n"
          "usb | usbdesc | midimon <0|1|2 raw|3 raw+clocks> | usbpull <0 pull-downs|1 released> | clock <0|1> (follow MIDI clock)\n"
-         "midimap [reload] (MIDI pages from /midimap.json) | midiin <status> <d1> <d2> (hex, as from USB)");
+         "midimap [reload|defaults] (MIDI pages from /midimap.json) | midiin <status> <d1> <d2> (hex, as from USB)");
     fputs("params:", stdout);
     for (int p = 0; p < P_NUM_PARAMS; ++p)
         printf(" %s", g_param_names[p]);
@@ -157,7 +157,11 @@ static void shell_line(char* line) {
     else if (!strcmp(c, "reset")) ctrl_reset_write(1);
     else if (!strcmp(c, "usb")) { usbh_status(); mapping_midi_status(); }
     else if (!strcmp(c, "usbdesc")) usbh_descriptors();
-    else if (!strcmp(c, "midimap")) { if (argc > 1) mapping_midimap_load(); mapping_midimap_print(); }
+    else if (!strcmp(c, "midimap")) {
+        if (argc > 1 && !strcmp(argv[1], "defaults")) mapping_midimap_defaults();
+        else if (argc > 1) mapping_midimap_load();
+        mapping_midimap_print();
+    }
     else if (!strcmp(c, "midiin") && argc > 1) /* hex bytes, as if they came from USB */
         mapping_midi((uint8_t)strtoul(argv[1], NULL, 16), (uint8_t)(argc > 2 ? strtoul(argv[2], NULL, 16) : 0),
                      (uint8_t)(argc > 3 ? strtoul(argv[3], NULL, 16) : 0));

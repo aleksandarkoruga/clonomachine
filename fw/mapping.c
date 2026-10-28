@@ -258,6 +258,22 @@ void mapping_midimap_load(void) {
     pages_prepare();
 }
 
+/* console "midimap defaults": the current file goes to /midimap.json.bak, the defaults replace it */
+void mapping_midimap_defaults(void) {
+    static char buf[4096];
+    const int n = samples_read_file("/midimap.json", buf, sizeof(buf));
+    if (n > 0 && samples_write_file("/midimap.json.bak", buf, n) != 0) {
+        printf("MIDI: could not save /midimap.json.bak, nothing changed\n");
+        return;
+    }
+    midimap_defaults(&g_mm);
+    const int len = midimap_write(&g_mm, buf, sizeof(buf));
+    printf("MIDI: /midimap.json %s\n", samples_write_file("/midimap.json", buf, len) == 0
+                                           ? "now the defaults (the old one is /midimap.json.bak)"
+                                           : "could not be written (defaults in use until reboot)");
+    pages_prepare();
+}
+
 void mapping_midimap_print(void) {
     static char buf[4096];
     midimap_write(&g_mm, buf, sizeof(buf));
