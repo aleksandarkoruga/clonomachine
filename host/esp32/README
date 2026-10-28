@@ -1,19 +1,26 @@
-On-board ESP32 of the ULX3S v3.0.8 (read 2026-10-28 through passthru.v):
+The ULX3S's on-board ESP32 (as read through passthru.v):
   ESP32 with PSRAM ("ESP32 module (spiram)", ~4 MB heap), 4 MB flash, MicroPython v1.14
-  (2021-02-02) with only the default boot.py, CPU at 160 MHz, unique id c88541c9c368.
+  (2021-02-02, the version esp32ecp5 recommends) with only the default boot.py (no esp32ecp5
+  files on the filesystem), CPU at 160 MHz, unique id c88541c9c368.
+
+Board revision: the pins behave like ULX3S v3.1.6+ (emard/ulx3s doc/constraints/prototype/
+ulx3s_v316.lpf): wifi_en = J5, wifi_gpio0 = F1 (wifi_en on v3.0.x), wifi_gpio22 = L2
+(wifi_gpio0 on v3.0.x). The LiteX platform and passthru.v use the v3.0.x pins, so here F1 drove
+GPIO0 (it followed RTS through the EN logic) and L2 drove GPIO22: that is why esptool's reset
+failed. The official flow (emard/ulx3s-passthru, ulx3s_v20_passthru_wifi.vhd): DTR/RTS -> EN/GPIO0
+as in passthru.v, BTN0 also holds GPIO0 low, GPIO2 (sd_d0) low while entering programming;
+then esptool / Arduino ("WEMOS LOLIN32") on the USB serial port.
+The sampler gateware also drives L2 low ("wifi_gpio0"), which on this board is GPIO22.
+
+Official ESP32 software: esp32ecp5 (MicroPython): ecp5.prog / ecp5.flash, FTP server (put x.bit
+fpga | flash@0x... | sd@0x...), SD over SPI, WebREPL. The ESP32 reaches the FPGA's JTAG directly
+(tms=5 tck=18 tdi=23 tdo=34), so it can program SRAM / config flash whatever bitstream runs.
 
 Tools here:
   esp.sh <esptool args>   builds/loads the pass-through into the FPGA's SRAM, runs esptool
   esptool_ftdi.py         esptool over pyftdi (the FT231X is in bit-bang mode after
                           openFPGALoader); classic DTR/RTS reset instead of the tty-only one
   boot_log.py             reset + print what the ESP32 says at 115200
-
-Reset / download mode on this board: the FPGA pins wifi_en (F1) and wifi_gpio0 (L2) do nothing
-(driven low: no reset, GPIO0 still reads 1). GPIO0 follows the FT231X RTS line directly
-(pyserial rts=True -> GPIO0 low), DTR does nothing, so esptool's auto-reset can't work and a
-software restart (machine.reset) doesn't re-read GPIO0. Talking to MicroPython works (REPL at
-115200 through the pass-through). To flash: hold RTS (GPIO0 low) over a real power-on reset of
-the ESP32 (untested idea: the FPGA's shutdown pin G16 + the PWR button, with the FT231X staying
-powered from USB), then esptool --before no_reset; after that, updates over WiFi (OTA).
-The sampler keeps the SD card; the ESP32 firmware must never touch the SD pins (GPIO2/4/12/13/
-14/15) nor GPIO16/17 (PSRAM).
+The MicroPython REPL works through the pass-through at 115200.
+The ESP32 firmware must never touch the SD pins (GPIO2/4/12/13/14/15) while the FPGA owns the
+card, nor GPIO16/17 (PSRAM) or drive GPIO5 (TMS) early after boot.
