@@ -86,10 +86,10 @@ A class-compliant USB-MIDI interface on **US2** (tested: CH345 cables `1a86:752d
 enumerated by the firmware. MIDI pages from **`/midimap.json`** on the card (written with the
 defaults when missing; edit on a PC, `midimap reload` on the console) map channels to voices:
 default Machinedrum MIDI machines on channel 5 (drums, voice 0), 3 (melody, voice 1), 6
-(third voice). Consecutive CCs from the page's first one (16, 16, 25) drive bufNum rate pitch
-gate interval fxSend (the 6 the MD's MIDI machine sends), then repeats overlap randPos
-randomPitch prob separation maxGrains tempoLock bgAdvance envHold pvTransient noteMode;
-velocity = volume, pitch bend = bank (its 7 coarse bits, spread over all the voice's banks),
+(third voice). Consecutive CCs from the page's first one (16, 16, 25) drive bufNum bank rate
+pitch gate interval (the 6 the MD's MIDI machine sends), then repeats fxSend overlap randPos
+randomPitch prob separation maxGrains tempoLock bgAdvance envHold pvTransient; velocity =
+volume, pitch bend = cutter handover (voice 0) / noteMode (the MD sends only its 7 coarse bits),
 mod wheel = grains / time stretcher, aftertouch = grainDur. `midimap defaults` rewrites the
 file with these (the old one stays as `/midimap.json.bak`). Other channels use the Monomachine
 table.

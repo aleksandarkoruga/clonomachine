@@ -297,7 +297,7 @@ static void apply(int pi, int t, int v) {
         return;
     switch (t) {
     case MT_BUFNUM: raw_param(s, P_BUFNUM, v); break;
-    case MT_BANK: slot_select_bank_frac(s, v); break; /* the 128 steps reach every bank */
+    case MT_BANK: raw_param(s, P_BANK, v); break;
     case MT_RATE: raw_param(s, P_RATE, g_pg[pi].lut_rate[v]); break;
     case MT_PITCH: raw_param(s, P_PITCH, lut_pitch[v]); break;
     case MT_GATE: raw_param(s, P_ENVBARS, (v + 1) * 2048); break;                 /* (cc+1)/32 bar */

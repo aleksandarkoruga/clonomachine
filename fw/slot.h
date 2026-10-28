@@ -46,7 +46,6 @@ extern uint32_t g_bpm_milli;           /* global tempo, bpm * 1000 */
 void slots_init(void);
 void slot_select(int s, int idx);      /* buffer inside the current/wanted bank (CC1, bufNum) */
 void slot_select_bank(int s, int bank);/* bank of the slot's library (PC, /bank)              */
-void slot_select_bank_frac(int s, int v); /* 0..127 spread over all of the slot's banks (MIDI) */
 void slots_service(void);              /* main loop: switch to loaded buffers, prefetch      */
 
 void slot_apply(int s);                /* every engine register of the slot */

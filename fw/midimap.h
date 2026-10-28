@@ -7,8 +7,8 @@
  *     "clockFollow": true,
  *     "pages": [
  *       { "channel": 5, "voice": 0, "cc": 16, "rate": [0, 4],
- *         "knobs": ["bufNum", "rate", "pitch", "gate", "interval", "fxSend", "repeats", ...],
- *         "velocity": "amp", "mw": "algo", "at": "grainDur", "pb": "bank" },
+ *         "knobs": ["bufNum", "bank", "rate", "pitch", "gate", "interval", "repeats", "fxSend", ...],
+ *         "velocity": "amp", "mw": "algo", "at": "grainDur", "pb": "cutter" },
  *       ...
  *     ]
  *   }

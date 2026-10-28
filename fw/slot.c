@@ -292,12 +292,6 @@ void slot_select_bank(int s, int bank) {
     try_switch(s);
 }
 
-/* a 7-bit control over all of the slot's banks: the whole range reaches every one */
-void slot_select_bank_frac(int s, int v) {
-    const int nb = g_libs[slot_lib(s)].nbanks;
-    slot_select_bank(s, nb > 0 ? (v < 0 ? 0 : v > 127 ? 127 : v) * nb / 128 : 0);
-}
-
 void slots_service(void) {
     int busy = 0;
     for (int s = 0; s < NUM_SLOTS; ++s) {
