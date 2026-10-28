@@ -23,7 +23,7 @@ revisions in use are pinned in `deps.lock`.
 | `sim/` | Verilator: RTL vs model (`make run`), PV unit job by job (`make pvrun`), DSM spectrum test |
 | `include/sampler_regs.h` | engine register map (RTL, model, firmware) |
 | `include/sampler_events.h` | 8-byte control events + SLIP/CRC framing + RAW_PARAM ids |
-| `soc/ulx3s_sampler.py` | LiteX SoC (VexRiscv, SDRAM, SD, SPI flash, ESP32-S3 UART, USB host on US2 (OHCI), sampler) |
+| `soc/ulx3s_sampler.py` | LiteX SoC (VexRiscv, SDRAM, SD, SPI flash, on-board ESP32 UART, USB host on US2 (OHCI), sampler) |
 | `fw/` | firmware: SD index + SDRAM cache, tempo/slot logic, USB-MIDI host + MIDI pages (`/midimap.json`), Monomachine map, shell |
 | `host/` | loader, console, flash script, OSC bridge, SuperCollider example |
 
@@ -139,4 +139,6 @@ table.
 
 ULX3S v3.0.8, LFE5U-85F, SDRAM MT48LC16M16-compatible (32 MB, memtest OK),
 SPI flash ISSI IS25LP128 (bitstream @0, firmware boot image @4 MB).
-ESP32-S3 UART reserved on GP0 (FPGA TX) / GN0 (FPGA RX), 3 Mbaud; GP1 frame-ready.
+On-board ESP32 (ESP32-D0WD-V3, PSRAM, 16 MB flash) on its own UART: K3 FPGA TX -> ESP RX, K4 ESP
+TX -> FPGA RX, 3 Mbaud. The board has the v3.1.6+ ESP pinout (EN J5, GPIO0 F1, GPIO22 L2; the
+LiteX platform has the v3.0.x pins), see `host/esp32/README` for the pass-through / esptool.

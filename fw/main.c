@@ -1,4 +1,4 @@
-/* ULX3S sampler firmware: SD -> SDRAM loader, event loop (USB console + ESP32-S3 UART),
+/* ULX3S sampler firmware: SD -> SDRAM loader, event loop (USB console + ESP32 UART),
  * text shell on the console for bring-up. */
 #include <stdio.h>
 #include <stdlib.h>

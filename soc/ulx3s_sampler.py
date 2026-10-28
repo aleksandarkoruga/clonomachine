@@ -40,14 +40,21 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 FW_FLASH_OFFSET = 0x400000
 from sampler import Sampler
 
-# Header pins for the ESP32-S3 link (3.3 V). GP0/GN0/GP1 on the ULX3S J1 header.
+# On-board ESP32 with the ULX3S v3.1.6+ pinout (emard/ulx3s doc/constraints/prototype/
+# ulx3s_v316.lpf). The LiteX platform has the v3.0.x pins: there EN = F1 and GPIO0 = L2, here
+# GPIO0 = F1, EN = J5 and L2 is GPIO22. EN and GPIO0 stay inputs with pull-ups: the ESP32 boots
+# its own firmware and the sampler never resets it (host/esp32/ has the pass-through for that).
 _esp_io = [
     ("esp_serial", 0,
-        Subsignal("tx", Pins("B11")),   # GP0: FPGA TX -> ESP32-S3 RX
-        Subsignal("rx", Pins("C11"), Misc("PULLMODE=UP")),   # GN0: ESP32-S3 TX -> FPGA RX
+        Subsignal("tx", Pins("K3")),                        # FPGA TX -> ESP32 RX (wifi_rxd)
+        Subsignal("rx", Pins("K4"), Misc("PULLMODE=UP")),   # ESP32 TX -> FPGA RX (wifi_txd)
         IOStandard("LVCMOS33"),
     ),
-    ("esp_frame_ready", 0, Pins("A10"), IOStandard("LVCMOS33"), Misc("PULLMODE=DOWN")),  # GP1
+    ("esp_ctl", 0,
+        Subsignal("en",    Pins("J5"), Misc("PULLMODE=UP")),
+        Subsignal("gpio0", Pins("F1"), Misc("PULLMODE=UP")),
+        IOStandard("LVCMOS33"),
+    ),
 ]
 
 
@@ -83,8 +90,6 @@ class _CRG(LiteXModule):
             upll.create_clkout(self.cd_usb, 48e6, margin=2.5e-3)
 
         self.specials += DDROutput(1, 0, platform.request("sdram_clock"), ClockSignal("sys_ps"))
-        # SD card owned by the FPGA (on-board ESP32 GPIO0 held low).
-        self.comb += platform.request("wifi_gpio0").eq(0)
 
 
 class _UsbPull(LiteXModule):
@@ -141,9 +146,10 @@ class SamplerSoC(SoCCore):
         # SD card ----------------------------------------------------------------------------------
         self.add_sdcard()
 
-        # ESP32-S3 link: second UART, 3 Mbaud ------------------------------------------------------
+        # On-board ESP32 link: second UART, 3 Mbaud; EN / GPIO0 readable (inputs) -----------------
         self.add_uart(name="esp_uart", uart_name="esp_serial", baudrate=3_000_000, fifo_depth=256)
-        self.esp_frame_ready = GPIOIn(platform.request("esp_frame_ready"))
+        esp_ctl = platform.request("esp_ctl")
+        self.esp_ctl = GPIOIn(Cat(esp_ctl.en, esp_ctl.gpio0))
 
         # Sampler ----------------------------------------------------------------------------------
         port = self.sdram.crossbar.get_port(mode="read")

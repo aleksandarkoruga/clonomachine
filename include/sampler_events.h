@@ -1,4 +1,4 @@
-/* Control events. The ESP32-S3 (or host/osc_bridge.py) turns OSC / MIDI
+/* Control events. The on-board ESP32 (or host/osc_bridge.py) turns OSC / MIDI
  * into these and sends them SLIP-framed to the FPGA soft core:
  *
  *   frame   = SLIP( event[0] .. event[n-1], crc8 )      n >= 1
@@ -6,8 +6,8 @@
  *   crc8    = CRC-8, poly 0x07, init 0x00, over all event bytes of the frame
  *   SLIP    : END 0xC0 (also sent before the frame), ESC 0xDB, ESC_END 0xDC, ESC_ESC 0xDD
  *
- * Links: USB console UART (115200, mixed with the text shell) and the ESP32-S3 UART on
- * the header (3 Mbaud).
+ * Links: USB console UART (1 Mbaud, mixed with the text shell) and the on-board ESP32's
+ * UART (3 Mbaud).
  */
 #ifndef SAMPLER_EVENTS_H
 #define SAMPLER_EVENTS_H
