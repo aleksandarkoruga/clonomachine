@@ -82,7 +82,7 @@ channels (mixed to mono), any rate.
 
 ## MIDI (USB-MIDI cable on US2)
 
-A class-compliant USB-MIDI interface on **US2** (tested: CH345 cables, `1a86:752d`) is
+A class-compliant USB-MIDI interface on **US2** (tested: CH345 cables `1a86:752d`; "U2MIDI Pro" `7104:1400`, which stays clean with the board's audio going into the Machinedrum) is
 enumerated by the firmware. MIDI pages from **`/midimap.json`** on the card (written with the
 defaults when missing; edit on a PC, `midimap reload` on the console) map channels to voices:
 default Machinedrum MIDI machines on channel 5 (drums, voice 0), 3 (melody, voice 1), 6
