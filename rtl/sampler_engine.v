@@ -32,7 +32,9 @@ module sampler_engine #(
     parameter EXP2_HEX          = "exp2.hex",
     parameter PV_SIN_HEX        = "pv_sin.hex",
     parameter PV_ATAN_HEX       = "pv_atan.hex",
-    parameter PV_WIN_HEX        = "pv_win.hex"
+    parameter PV_WIN_HEX        = "pv_win.hex",
+    parameter RV_T0_HEX         = "rv_t0.hex",
+    parameter RV_T1_HEX         = "rv_t1.hex"
 ) (
     input  wire               clk,
     input  wire               rst,
@@ -146,8 +148,10 @@ module sampler_engine #(
     reg [15:0] r_algo     [0:N_SLOTS-1];   // ALGO_AMP
     reg [2:0]  r_algosel  [0:N_SLOTS-1];   // ALGO: [1:0] algorithm, [2] PV no transient
     reg [1:0]  r_out      [0:N_SLOTS-1];   // OUT: [0] left, [1] right
+    reg [15:0] r_fxsend   [0:N_SLOTS-1];   // FX_SEND: u4.12 into the plate reverb
     reg [4:0]  pend_stb   [0:N_SLOTS-1];
     reg [15:0] g_master;
+    reg [15:0] g_revret;                   // REV_RETURN: u4.12, the plate into the right output
     reg [31:0] g_beatinc;
 
     // ------------------------------------------------------------------ slot state
@@ -257,9 +261,10 @@ module sampler_engine #(
         ST_OUT3   = 6'd52, ST_NEXT   = 6'd53, ST_MIX0   = 6'd54, ST_MIX1   = 6'd55,
         ST_MULW   = 6'd56, ST_E4B    = 6'd58, ST_G1B    = 6'd59, ST_G3B    = 6'd60, ST_SLOT2  = 6'd61,
         ST_PV0    = 6'd43, ST_PVJ    = 6'd44, ST_PVE    = 6'd45, ST_PVM0   = 6'd46, ST_PVM1   = 6'd47,
-        ST_PVM2   = 6'd57, ST_PVM3   = 6'd62, ST_PVM4   = 6'd63;
+        ST_PVM2   = 6'd57, ST_PVM3   = 6'd62, ST_PVM4   = 6'd63,
+        ST_FX     = 7'd64, ST_RVW    = 7'd65, ST_RV     = 7'd66;
 
-    reg  [5:0]  state, mret;
+    reg  [6:0]  state, mret;
     reg  [1:0]  mcnt;
     reg  [SLOT_BITS-1:0] cs;
 
@@ -298,7 +303,20 @@ module sampler_engine #(
     reg  [55:0] off;
     reg  [31:0] wp0;
     reg  signed [27:0] o1;
-    reg  signed [26:0] mix_l, mix_r;
+    reg  signed [26:0] mix_l, mix_r, mix_fx;
+
+    // ------------------------------------------------------------------ plate reverb
+    // The voices' send mix of sample n goes in after their mix; the plate's sample comes back
+    // into the right output at sample n+1 (it runs beside the engine, ~270 cycles).
+    reg                rv_start, rv_we;
+    reg  signed [23:0] rv_in;
+    reg  [5:0]         rv_waddr;
+    reg  [31:0]        rv_wdata;
+    wire signed [23:0] rv_out;
+    wire               rv_busy;
+    reverb_unit #(.T0_HEX(RV_T0_HEX), .T1_HEX(RV_T1_HEX)) u_rv (
+        .clk(clk), .rst(rst), .start(rv_start), .in(rv_in), .out(rv_out), .busy(rv_busy),
+        .we(rv_we), .waddr(rv_waddr), .wdata(rv_wdata));
 
     // grain scratch
     reg  [31:0] g_wp, g_wi;
@@ -465,6 +483,8 @@ module sampler_engine #(
         tag_we  <= 1'b0;
         out_stb <= 1'b0;
         stat_we <= 1'b0;
+        rv_start <= 1'b0;
+        rv_we    <= 1'b0;
 
         // sample tick
         if (tick_cnt == CYCLES_PER_SAMPLE - 1) begin
@@ -483,6 +503,7 @@ module sampler_engine #(
                 if (sl == 3'd7) begin
                     case (cmd_addr[4:0])
                     5'd0: g_master  <= cmd_data[15:0];
+                    5'd4: g_revret  <= cmd_data[15:0];
                     5'd1: g_beatinc <= cmd_data;
                     5'd2: if (cmd_data[0]) beat <= 64'd0;
                     5'd3: begin
@@ -492,6 +513,10 @@ module sampler_engine #(
                     end
                     default: ;
                     endcase
+                end else if (sl == 3'd5 || sl == 3'd6) begin   // the plate's per-rail registers
+                    rv_we    <= 1'b1;
+                    rv_waddr <= {sl == 3'd6, cmd_addr[4:0]};
+                    rv_wdata <= cmd_data;
                 end else if (sl < N_SLOTS) begin
                     case (cmd_addr[4:0])
                     5'd0:  r_ctrl[sl]     <= cmd_data[3:0];
@@ -518,6 +543,7 @@ module sampler_engine #(
                     5'd20: r_amp[sl]      <= cmd_data[15:0];
                     5'd21: r_algo[sl]     <= cmd_data[15:0];
                     5'd22: r_out[sl]      <= cmd_data[1:0];
+                    5'd24: r_fxsend[sl]   <= cmd_data[15:0];
                     default: ;
                     endcase
                 end
@@ -527,6 +553,7 @@ module sampler_engine #(
                 cs        <= 0;
                 mix_l     <= 0;
                 mix_r     <= 0;
+                mix_fx    <= 0;
                 state     <= ST_SLOT;
             end
             // stream status words
@@ -1177,27 +1204,46 @@ module sampler_engine #(
                 s_out[cs] <= so;
                 if (r_out[cs][0]) mix_l <= mix_l + so;
                 if (r_out[cs][1]) mix_r <= mix_r + so;
-                // deactivation clear job (faded out)
-                pj_valid <= x_clr;
-                pj_clear <= 1'b1;
-                pj_slot  <= cs;
-                x_clr    <= 1'b0;
-                state <= ST_NEXT;
+                ma    <= {{26{so[23]}}, so};          // its send into the plate
+                mb    <= $signed({2'b00, r_fxsend[cs]});
+                mret  <= ST_FX;
+                state <= ST_MULW;
             end
+        end
+        ST_FX: begin
+            mix_fx   <= mix_fx + (mp >>> 12);
+            // deactivation clear job (faded out)
+            pj_valid <= x_clr;
+            pj_clear <= 1'b1;
+            pj_slot  <= cs;
+            x_clr    <= 1'b0;
+            state    <= ST_NEXT;
         end
         ST_NEXT: begin
             pj_valid <= 1'b0;
             if (pj_valid && !pj_ready)
                 pv_drops <= pv_drops + 1'b1;
-            if (cs == N_SLOTS - 1) begin
-                ma    <= {{23{mix_l[26]}}, mix_l};
-                mb    <= $signed({2'b00, g_master});
-                mret  <= ST_MIX0;
-                state <= ST_MULW;
-            end else begin
+            if (cs == N_SLOTS - 1)
+                state <= ST_RVW;
+            else begin
                 cs    <= cs + 1'b1;
                 state <= ST_SLOT;
             end
+        end
+        ST_RVW: if (!rv_busy) begin                 // the plate's last sample, into the right
+            ma    <= {{26{rv_out[23]}}, rv_out};
+            mb    <= $signed({2'b00, g_revret});
+            mret  <= ST_RV;
+            state <= ST_MULW;
+        end
+        ST_RV: begin
+            mix_r    <= mix_r + (mp >>> 11);         // Q2.22 -> the mix's Q1.23
+            rv_in    <= sat24(mix_fx >>> 1);
+            rv_start <= 1'b1;
+            ma       <= {{23{mix_l[26]}}, mix_l};
+            mb       <= $signed({2'b00, g_master});
+            mret     <= ST_MIX0;
+            state    <= ST_MULW;
         end
         ST_MIX0: begin
             out_l <= sat24(mp >>> 12);
@@ -1270,6 +1316,7 @@ module sampler_engine #(
             mcnt      <= 0;
             stat_addr <= 0;
             g_master  <= 16'd4096;
+            g_revret  <= 16'd0;
             g_beatinc <= 0;
             pf_wp     <= 0;
             pf_rp     <= 0;
@@ -1303,6 +1350,7 @@ module sampler_engine #(
                 r_algo[i]     <= 16'd32768;
                 r_algosel[i]  <= 3'd0;
                 r_out[i]      <= 2'b11;
+                r_fxsend[i]   <= 16'd0;
                 pv_act[i]     <= 1'b0;
                 pv_alg[i]     <= 2'd0;
                 pv_xfs[i]     <= 32'd0;

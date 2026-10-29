@@ -16,6 +16,11 @@
 #define SMP_GRAINS_PER_SLOT   32
 #define SMP_GLOBAL_SLOT       7
 #define SMP_ADDR(slot, reg)   ((((slot) & 7) << 5) | ((reg) & 31))
+/* the plate reverb's per-rail registers (rtl/reverb_unit.v, fw/reverb_ctl.c) in two pages that
+   would be slots 5 and 6 (so at most 5 voices with the reverb): page 0 regs 0..15 next target
+   length (Q11.20), 16..31 next gain (Q1.17); page 1 regs 0..15 next pole (Q1.17) */
+#define SMP_REV_PAGE0         5
+#define SMP_REV_PAGE1         6
 
 /* Buffer layout in SDRAM (16-bit words), starting at BASE:
  *   [PREPAD words: copy of the last PREPAD samples][FRAMES samples][POSTPAD: copy of first samples]
@@ -51,7 +56,8 @@ enum {
     SMP_R_OUT         = 22, /* bit0 to the left output, bit1 to the right (reset 3: both)      */
     SMP_R_BG_INC      = 23, /* s8.24 background phasor = TEMPO_RATIO*bufSR/engineSR: the wall
                                clock of POS_BG, without RATE (RATE applies from the latch)    */
-    SMP_NUM_SLOT_REGS = 24
+    SMP_R_FX_SEND     = 24, /* u4.12 the voice's send into the plate reverb (reset 0)           */
+    SMP_NUM_SLOT_REGS = 25
 };
 
 #define SMP_CTRL_ENABLE    (1u << 0)
@@ -87,7 +93,8 @@ enum {
     SMP_G_MASTER      = 0,  /* u4.12 master gain                                                */
     SMP_G_BEAT_INC    = 1,  /* u0.32 beats per sample = bpm/60/fs * 2^32                        */
     SMP_G_BEAT_CTRL   = 2,  /* write-only: bit0 reset beat phase to 0                           */
-    SMP_G_CLR_STATS   = 3   /* write-only: clear miss/drop counters and cycle high-water mark   */
+    SMP_G_CLR_STATS   = 3,  /* write-only: clear miss/drop counters and cycle high-water mark   */
+    SMP_G_REV_RETURN  = 4   /* u4.12 the plate reverb into the right output (reset 0)          */
 };
 
 /* ---- status words ---- */

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "../include/sampler_regs.h"
+#include "reverb_model.h"
 #include "pv_model.h"
 
 namespace smp {
@@ -93,6 +94,9 @@ public:
     int nSlots;
     std::vector<Slot> slots;
     uint32_t master = 4096;
+    ReverbModel rev;         // the plate: the voices' sends in, its sample back into the right
+    int32_t revOut = 0;      // (one sample later)
+    uint32_t revRet = 0;
     uint64_t beat = 0;
     uint32_t beatInc = 0;
     uint32_t samples = 0;

@@ -263,6 +263,7 @@ void Engine::write(uint32_t addr, uint32_t data) {
     if (s == SMP_GLOBAL_SLOT) {
         switch (reg) {
         case SMP_G_MASTER: master = data & 0xFFFF; break;
+        case SMP_G_REV_RETURN: revRet = data & 0xFFFF; break;
         case SMP_G_BEAT_INC: beatInc = data; break;
         case SMP_G_BEAT_CTRL:
             if (data & 1)
@@ -270,6 +271,16 @@ void Engine::write(uint32_t addr, uint32_t data) {
             break;
         default: break;
         }
+        return;
+    }
+    if (s == SMP_REV_PAGE0 || s == SMP_REV_PAGE1) { /* the plate's registers */
+        const int r = reg & 15;
+        if (s == SMP_REV_PAGE0 && reg < 16)
+            rev.next.target[r] = data & 0x7FFFFFFF;
+        else if (s == SMP_REV_PAGE0)
+            rev.next.gain[r] = (int32_t)(data & 0x1FFFF);
+        else if (reg < 16)
+            rev.next.pole[r] = (int32_t)(data & 0x1FFFF);
         return;
     }
     if (s >= static_cast<uint32_t>(nSlots) || reg >= SMP_NUM_SLOT_REGS)
@@ -416,7 +427,7 @@ int32_t Engine::mixSlot(int s) {
 }
 
 int32_t Engine::step() {
-    int64_t sumL = 0, sumR = 0;
+    int64_t sumL = 0, sumR = 0, sumFx = 0;
     for (int s = 0; s < nSlots; ++s) {
         slots[s].step(mem, tab);
         const int32_t o = mixSlot(s);
@@ -424,7 +435,11 @@ int32_t Engine::step() {
             sumL += o;
         if (slots[s].r[SMP_R_OUT] & 2)
             sumR += o;
+        sumFx += (static_cast<int64_t>(o) * (slots[s].r[SMP_R_FX_SEND] & 0xFFFF)) >> 12;
     }
+    /* the plate's sample from the last send into the right (Q2.22 -> Q1.23), then this send */
+    sumR += (static_cast<int64_t>(revOut) * revRet) >> 11;
+    revOut = rev.step(sat(sumFx >> 1, 24));
     beat += beatInc;
     ++samples;
     outR = sat((sumR * master) >> 12, 24);

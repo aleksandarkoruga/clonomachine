@@ -5,6 +5,7 @@
 #include "Vsampler_engine.h"
 #include "verilated.h"
 #include "../model/sampler_model.h"
+#include "../fw/reverb_ctl.h"
 
 #include <cmath>
 #include <cstdio>
@@ -304,6 +305,47 @@ int main(int argc, char** argv) {
         if (n == 20000) {
             w.push_back({SMP_ADDR(0, SMP_R_OUT), 2});
             w.push_back({SMP_ADDR(1, SMP_R_OUT), 0});
+        }
+    }});
+    scs.push_back({"plate_reverb", 40000, 40, true, [](int n, std::vector<Write>& w) {
+        // sends from both voices (slot 0 left, slot 1 PV right), the plate into the right; the
+        // soft core's control (fw/reverb_ctl.c) writes the rails every block; sizes glide, the
+        // decay changes, slot 0 stops so the tail rings out, then the return goes up
+        static rv_ctl ctl;
+        static rv_params p;
+        if (n == 0) {
+            rv_defaults(&p);
+            p.rand1 = 16384;
+            p.wander = 1311;
+            rv_init(&ctl, 48000, 5, &p);
+            slotSetup(w, 0, gBufA, 0.04, 4, 1.0, 1.0);
+            w.push_back({SMP_ADDR(0, SMP_R_OUT), 1});
+            w.push_back({SMP_ADDR(0, SMP_R_FX_SEND), 4096});
+            w.push_back({SMP_ADDR(0, SMP_R_CTRL), SMP_CTRL_ENABLE | SMP_CTRL_ENV_HOLD});
+            w.push_back({SMP_ADDR(0, SMP_R_STROBE), SMP_STROBE_TRIG});
+            slotSetup(w, 1, gBufB, 0.03, 3, 0.8, 1.2);
+            w.push_back({SMP_ADDR(1, SMP_R_ALGO), 1});
+            w.push_back({SMP_ADDR(1, SMP_R_OUT), 2});
+            w.push_back({SMP_ADDR(1, SMP_R_FX_SEND), 2048});
+            w.push_back({SMP_ADDR(1, SMP_R_CTRL), SMP_CTRL_ENABLE | SMP_CTRL_ENV_HOLD});
+            w.push_back({SMP_ADDR(1, SMP_R_STROBE), SMP_STROBE_TRIG});
+            w.push_back({SMP_ADDR(SMP_GLOBAL_SLOT, SMP_G_REV_RETURN), 4096});
+        }
+        if (n == 12000) { p.time = 3277; p.glide = 32768; rv_set(&ctl, &p); }
+        if (n == 20000) {
+            p.decay = 98304; p.hf_decay = 19661; rv_set(&ctl, &p);
+            w.push_back({SMP_ADDR(0, SMP_R_STROBE), SMP_STROBE_KILL});
+        }
+        if (n == 30000)
+            w.push_back({SMP_ADDR(SMP_GLOBAL_SLOT, SMP_G_REV_RETURN), 8192});
+        if (n % 256 == 0) {
+            rv_regs r;
+            rv_block(&ctl, &r);
+            for (int k = 0; k < 16; ++k) {
+                w.push_back({SMP_ADDR(SMP_REV_PAGE0, k), r.target[k]});
+                w.push_back({SMP_ADDR(SMP_REV_PAGE0, 16 + k), (uint32_t)r.gain[k]});
+                w.push_back({SMP_ADDR(SMP_REV_PAGE1, k), (uint32_t)r.pole[k]});
+            }
         }
     }});
     scs.push_back({"bg_advance", 40000, 40, true, [](int n, std::vector<Write>& w) {
