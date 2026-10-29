@@ -8,7 +8,7 @@
 const char* const mm_target_names[MT_NUM] = {
     "none",   "bufNum", "bank",      "rate",        "pitch",    "gate",     "interval",  "amp",
     "overlap", "randPos", "randomPitch", "prob",    "separation", "maxGrains", "tempoLock", "bgAdvance",
-    "envHold", "pvTransient", "algo",     "grainDur", "noteMode", "out",      "cutter", "repeats", "fxSend"};
+    "envHold", "pvTransient", "algo",     "grainDur", "noteMode", "out",      "cutter", "repeats", "fxSend", "volume"};
 
 static int name_eq(const char* a, const char* b) { /* case-insensitive */
     for (; *a && *b; ++a, ++b)
@@ -42,7 +42,8 @@ static void page_init(struct mm_page* p, int chan1, int voice, int cc, int rate_
     p->mw = MT_ALGO;
     p->at = MT_GRAINDUR;
     p->pb = (uint8_t)pb;
-    p->vel = MT_AMP;
+    p->vel = MT_VOLUME;
+    p->note_off = 1;
 }
 
 void midimap_defaults(struct midimap* m) {
@@ -112,6 +113,10 @@ static int parse_page(struct json* j, struct mm_page* p, char* err, int errn) {
         } else if (name_eq(key, "velocity")) {
             if (!target(j, &p->vel, err, errn))
                 return 0;
+        } else if (name_eq(key, "noteOff")) {
+            int b = 1;
+            json_bool(j, &b);
+            p->note_off = (uint8_t)b;
         } else
             json_skip(j); /* "_comment" and the like */
     }
@@ -198,7 +203,9 @@ int midimap_write(const struct midimap* m, char* buf, int n) {
         "passed on to the break cutter on the ESP32 (0: none). Controls: ");
     for (int t = 0; t < MT_NUM; ++t)
         OUT("%s%s", mm_target_names[t], t + 1 < MT_NUM ? " " : "");
-    OUT(". gate = (cc+1)/32 bar; repeats: stutter retriggers per note; fxSend: reverb send; cutter: below the "
+    OUT(". gate: 1/32 bar .. 16 bars (exponential, 64 ~ 3/4 bar); volume: on top of amp, kept while the cutter "
+        "plays; noteOff: false = a note-off doesn't end the gate; repeats: stutter retriggers per note; fxSend: reverb "
+        "send; cutter: below the "
         "centre hands voice 0 to the cutter (ESP32 or OSC).\",\n");
     OUT("  \"clockFollow\": %s,\n", m->clock_follow ? "true" : "false");
     OUT("  \"cutterChannel\": %d,\n", m->cutter_chan);
@@ -213,8 +220,9 @@ int midimap_write(const struct midimap* m, char* buf, int n) {
         for (int k2 = 0; k2 < p->nknobs; ++k2)
             OUT("\"%s\"%s", mm_target_names[p->knobs[k2]], k2 + 1 < p->nknobs ? ", " : "");
         OUT("],\n");
-        OUT("     \"velocity\": \"%s\", \"mw\": \"%s\", \"at\": \"%s\", \"pb\": \"%s\"}%s\n", mm_target_names[p->vel],
-            mm_target_names[p->mw], mm_target_names[p->at], mm_target_names[p->pb], i + 1 < m->npages ? "," : "");
+        OUT("     \"velocity\": \"%s\", \"noteOff\": %s, \"mw\": \"%s\", \"at\": \"%s\", \"pb\": \"%s\"}%s\n",
+            mm_target_names[p->vel], p->note_off ? "true" : "false", mm_target_names[p->mw], mm_target_names[p->at],
+            mm_target_names[p->pb], i + 1 < m->npages ? "," : "");
     }
     OUT("  ]\n}\n");
 #undef OUT

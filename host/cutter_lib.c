@@ -31,7 +31,8 @@ const char* cutl_preset_name(int n) { return cut_preset_name(n); }
 void cutl_knob(void* c, int k, float v) { cut_set_knob(c, k, v); }
 float cutl_get_knob(void* c, int k) { return ((struct cutter*)c)->p.knob[k]; }
 void cutl_conductor(void* c, int on) { cut_set_conductor(c, on); }
-int cutl_state(void* c, int* out) { /* owner playing n16 conductor cond_state preset step */
+void cutl_phrase(void* c, int bars, int sections) { cut_set_phrase(c, bars, sections); }
+int cutl_state(void* c, int* out) { /* owner playing n16 conductor cond_state preset step bars sections */
     const struct cutter* p = c;
     out[0] = p->owner;
     out[1] = p->playing;
@@ -40,7 +41,9 @@ int cutl_state(void* c, int* out) { /* owner playing n16 conductor cond_state pr
     out[4] = p->cond_state;
     out[5] = p->preset;
     out[6] = (int)p->step;
-    return 7;
+    out[7] = p->e.phrase_bars;
+    out[8] = p->e.section_phrases;
+    return 9;
 }
 int cutl_moves(void* c, int* out) {
     memcpy(out, ((struct cutter*)c)->stats_hits, sizeof(int) * CUT_NMOVES);

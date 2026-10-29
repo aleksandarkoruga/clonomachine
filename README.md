@@ -41,8 +41,10 @@ build/host/cutter_sim 2 8 173.5 -q              # offline: move histogram per pr
 
 It plays voice 0 only while it owns it (drum page pitch bend below the centre, or `cutter 1`).
 MIDI channel 7 (`cutterChannel`) goes to it: CC 16.. energy density syncopation anchor build
-character release memory surprise, mod wheel = release, notes = presets, pitch bend above the
-centre = the conductor plays the form. The drum page's sample knob picks the cutter's sample.
+character release memory surprise, CC 25 phrase bars (1..16), CC 26 phrases per section (1..8),
+mod wheel = release, notes = presets, pitch bend above the centre = the conductor plays the
+form. The drum page's sample knob picks the cutter's sample; its velocity (volume) and gate
+stay MIDI's, so the gate knob sets how long each cut sounds.
 Presets: straight, edits, jungle, drill, tape, v13, texture.
 
 ## Build / run
@@ -107,8 +109,10 @@ default Machinedrum MIDI machines on channel 5 (drums, voice 0), 3 (melody, voic
 (third voice). Consecutive CCs from the page's first one (16, 16, 25) drive bufNum bank rate
 pitch gate interval (the 6 the MD's MIDI machine sends), then repeats fxSend overlap randPos
 randomPitch prob separation maxGrains tempoLock bgAdvance envHold pvTransient; velocity =
-volume, pitch bend = cutter handover (voice 0) / noteMode (the MD sends only its 7 coarse bits),
-mod wheel = grains / time stretcher, aftertouch = grainDur. `midimap defaults` rewrites the
+volume (a multiplier on top of amp, also while the cutter plays voice 0), pitch bend = cutter
+handover (voice 0) / noteMode (the MD sends only its 7 coarse bits), mod wheel = grains / time
+stretcher, aftertouch = grainDur. gate: 1/32 bar .. 16 bars, exponential (64 ~ 3/4 bar), also
+while the cutter plays. `"noteOff": false` on a page: note-offs don't end its gate. `midimap defaults` rewrites the
 file with these (the old one stays as `/midimap.json.bak`). Other channels use the Monomachine
 table.
 

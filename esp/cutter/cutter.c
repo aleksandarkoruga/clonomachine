@@ -92,6 +92,13 @@ void cut_set_knob(struct cutter* c, int k, float v) {
 
 void cut_set_conductor(struct cutter* c, int on) { c->conductor = !!on; }
 
+void cut_set_phrase(struct cutter* c, int bars, int sections) {
+    if (bars > 0 && bars <= 16)
+        c->p.phrase_bars = bars;
+    if (sections > 0)
+        c->p.section_phrases = sections;
+}
+
 void cut_init(struct cutter* c, uint32_t seed) {
     memset(c, 0, sizeof(*c));
     params_default(&c->p);
@@ -127,9 +134,16 @@ static void conductor_next(struct cutter* c) {
     c->cond_state = next;
 }
 
-/* what plays: the knobs, through the conductor's section state (q: progress in the section) */
-static void effective(struct cutter* c, float q) {
+/* what plays: the knobs, through the conductor's section state (q: progress in the section).
+   The phrase geometry only changes at a phrase start (geometry = 1). */
+static void effective(struct cutter* c, float q, int geometry) {
+    const int bpb = c->e.beats_per_bar, pb = c->e.phrase_bars, sp = c->e.section_phrases;
     c->e = c->p;
+    if (!geometry && pb > 0) {
+        c->e.beats_per_bar = bpb;
+        c->e.phrase_bars = pb;
+        c->e.section_phrases = sp;
+    }
     if (!c->p.palette_fixed)
         palette_of(c->p.knob[CK_CHARACTER], c->e.palette);
     if (!c->conductor)
@@ -217,7 +231,7 @@ static void new_phrase(struct cutter* c) {
     const int section_start = c->phrase_idx % (uint32_t)sp == 0;
     if (section_start && c->conductor)
         conductor_next(c);
-    effective(c, 0);
+    effective(c, 0, 1);
     const float m = c->e.knob[CK_MEMORY];
     const float keep = section_start ? m * m : m;
     if (!c->phrase_seed || uni(&c->rng_fresh) >= keep)
@@ -252,11 +266,10 @@ static void trig_at(struct cut_frame* f, float pos) {
 }
 
 #define AMP 0.89f  /* -1 dB */
-#define GATE_LONG 16.0f
-
-/* one hit: buffer, volume, speeds, gate, stutter, then the position + trigger */
-static struct cut_frame* hit(struct cutter* c, float delay, int buf, float amp, float rate, float pitch, float gate,
-                             int repeats, float interval, float pos) {
+/* one hit: buffer, volume, speeds, stutter, then the position + trigger. The gate length is the
+   drum page's (MIDI): it sets how long each cut sounds, so the spacing of the silences. */
+static struct cut_frame* hit(struct cutter* c, float delay, int buf, float amp, float rate, float pitch, int repeats,
+                             float interval, float pos) {
     struct cut_frame* f = frame_at(c, delay);
     if (!f)
         return 0;
@@ -267,7 +280,6 @@ static struct cut_frame* hit(struct cutter* c, float delay, int buf, float amp, 
     ev(f, P_AMP, q16(amp));
     ev(f, P_RATE, q16(rate));
     ev(f, P_PITCH, q16(pitch));
-    ev(f, P_ENVDUR, q16(gate));
     ev(f, P_REPEATS, repeats);
     if (repeats)
         ev(f, P_INTERVAL, q16(interval > 0.25f ? 0.25f : interval));
@@ -301,7 +313,7 @@ static void sixteenth(struct cutter* c, int n, int emit) {
     const float p = (float)n / (float)P;
     const int sp = c->e.section_phrases > 0 ? c->e.section_phrases : 4;
     const float q = ((float)(c->phrase_idx % (uint32_t)sp) + p) / (float)sp;
-    effective(c, q);
+    effective(c, q, 0);
     const float ex = powf(2.0f, (c->e.knob[CK_BUILD] - 0.5f) * 4.0f);
     const float T = clamp01(0.75f * powf(p, ex) + 0.25f * powf(q, ex));
     for (int i = 0; i < NDRAW; ++i) { /* same count every 16th */
@@ -324,7 +336,7 @@ static void sixteenth(struct cutter* c, int n, int emit) {
     int buf = c->e.base_buf;
 
     if (n == 0) { /* back on the one: the loop where it belongs, everything reset */
-        hit(c, 0, buf, AMP, 1, 1, GATE_LONG, 0, 0, natural);
+        hit(c, 0, buf, AMP, 1, 1, 0, 0, natural);
         ++c->stats_hits[M_ONE];
         c->busy_until = 0;
         return;
@@ -359,7 +371,7 @@ static void sixteenth(struct cutter* c, int n, int emit) {
     if (in_release && c->e.release_mode == CR_FILL && (m < M_REPEAT || m == M_DROP))
         m = r[3] < 0.5f ? M_REPEAT : M_RATCHET;
     ++c->stats_hits[m];
-    float pos = natural, rate = 1, pitch = 1, gate = GATE_LONG;
+    float pos = natural, rate = 1, pitch = 1, stab = 0;
 
     switch (m) {
     case M_STRAIGHT:
@@ -383,12 +395,12 @@ static void sixteenth(struct cutter* c, int n, int emit) {
         static const float divs[] = {4, 6, 8, 3, 12};
         const float interval = beat / divs[(int)(r[4] * 5) % 5];
         const int reps = 1 + (int)(d * 6);
-        hit(c, 0, buf, AMP, 1, 1, GATE_LONG, reps, interval, natural);
+        hit(c, 0, buf, AMP, 1, 1, reps, interval, natural);
         c->busy_until = c->now + (float)reps * interval;
         return;
     }
-    case M_STAB:
-        gate = s16 * (0.5f + r[4]);
+    case M_STAB: /* staccato: the gate closes early this time */
+        stab = s16 * (0.5f + r[4]);
         break;
     case M_PITCH: {
         static const float ratios[] = {1.335f, 0.75f, 1.5f, 0.667f, 2.0f, 0.5f};
@@ -409,7 +421,7 @@ static void sixteenth(struct cutter* c, int n, int emit) {
         const float slow = r[6] < (1 - w) * 0.6f ? (r[7] < 0.5f ? 0.1f : 0.01f + 0.05f * r[8]) : 1;
         for (int k = 0; k < n_rep && t < 2 * beat; ++k) {
             const float a = AMP * (1 - 0.5f * (float)k / (float)n_rep);
-            hit(c, t, buf, a, k > 10 ? slow : 1, 1, GATE_LONG, 0, 0, natural);
+            hit(c, t, buf, a, k > 10 ? slow : 1, 1, 0, 0, natural);
             t += rd / (1 + c->e.accel * (float)k);
         }
         c->busy_until = c->now + t;
@@ -426,18 +438,18 @@ static void sixteenth(struct cutter* c, int n, int emit) {
     case M_TAPESTOP: {
         const int len = 1 + (int)(r[4] * (1 + d * 3)); /* 16ths */
         if (m == M_FREEZE)
-            hit(c, 0, buf, AMP, 0, 1, GATE_LONG, 0, 0, natural);
+            hit(c, 0, buf, AMP, 0, 1, 0, 0, natural);
         else
             for (int k = 0; k < 8; ++k) {
                 const float x = 1 - (float)k / 8;
                 struct cut_frame* f = k ? frame_at(c, (float)k * (float)len * s16 / 8) : 0;
                 if (!k)
-                    hit(c, 0, buf, AMP, 1, 1, GATE_LONG, 0, 0, natural);
+                    hit(c, 0, buf, AMP, 1, 1, 0, 0, natural);
                 else
                     ev(f, P_RATE, q16(0.02f + 0.98f * x * x));
             }
         /* back where the loop would be */
-        hit(c, (float)len * s16, buf, AMP, 1, 1, GATE_LONG, 0, 0, natural + (float)len * g16);
+        hit(c, (float)len * s16, buf, AMP, 1, 1, 0, 0, natural + (float)len * g16);
         c->busy_until = c->now + (float)len * s16;
         return;
     }
@@ -447,7 +459,9 @@ static void sixteenth(struct cutter* c, int n, int emit) {
         return;
     }
     }
-    hit(c, 0, buf, AMP, rate, pitch, gate, 0, 0, pos);
+    hit(c, 0, buf, AMP, rate, pitch, 0, 0, pos);
+    if (stab > 0)
+        ev(frame_at(c, stab), P_GATEOFF, 0);
 }
 
 static void step32(struct cutter* c, uint32_t s, int emit) {
@@ -514,9 +528,14 @@ void cut_rx(struct cutter* c, const struct smp_event* e) {
         if (e->a == 0)
             c->p.base_buf = e->b;
         break;
-    case EV_CC: /* the cutter channel: CC 16.. = the knobs, mod wheel = release */
+    case EV_CC: /* the cutter channel: CC 16.. = the knobs, then phrase bars and section phrases,
+                   mod wheel = release */
         if (e->a >= 16 && e->a < 16 + CK_NUM)
             cut_set_knob(c, e->a - 16, (float)e->b / 127.0f);
+        else if (e->a == 16 + CK_NUM)
+            cut_set_phrase(c, 1 + e->b * 15 / 127, 0);
+        else if (e->a == 17 + CK_NUM)
+            cut_set_phrase(c, 0, 1 + e->b * 7 / 127);
         else if (e->a == 1)
             cut_set_knob(c, CK_RELEASE, (float)e->b / 127.0f);
         break;

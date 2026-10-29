@@ -19,9 +19,11 @@
  * of an "intensity" number; syncopation pushes them to the weak positions.
  *
  * The FPGA sends a tick every 32nd (EV_TICK), the bpm, start/stop, who owns voice 0 and the
- * sample's length in 16ths, and the MIDI messages of the cutter channel (CCs = the knobs,
- * notes = presets, pitch bend = conductor auto / manual). The cutter answers with frames of
- * EV_RAW_PARAM events for slot 0, some of them delayed (ratchets, tape stops).
+ * sample's length in 16ths, and the MIDI messages of the cutter channel (CC 16.. = the knobs,
+ * CC 25 phrase bars 1..16, CC 26 phrases per section 1..8, notes = presets, pitch bend =
+ * conductor auto / manual). The cutter answers with frames of EV_RAW_PARAM events for slot 0,
+ * some of them delayed (ratchets, tape stops). Gate length and volume stay MIDI's (the drum
+ * page): the cutter's staccato only closes a gate early.
  */
 #ifndef CUTTER_H
 #define CUTTER_H
@@ -97,6 +99,7 @@ int cut_npresets(void);
 const char* cut_preset_name(int n);
 void cut_set_knob(struct cutter* c, int k, float v);
 void cut_set_conductor(struct cutter* c, int on);
+void cut_set_phrase(struct cutter* c, int bars, int sections); /* 0 keeps; from the next phrase */
 /* the host's clock in seconds: set it before cut_rx, which schedules from it */
 void cut_clock(struct cutter* c, double t);
 /* an event from the FPGA (EV_TICK, EV_BPM, EV_START, EV_STOP, EV_OWNER, EV_LOAD_BUF, the

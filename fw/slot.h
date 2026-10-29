@@ -38,6 +38,7 @@ struct slot {
     int repeats;
     int32_t interval_q16;    /* stutter period, seconds                                  */
     int32_t amp_q16, algo_q16;
+    int32_t vol_q16;            /* MIDI volume (note velocity) on top of amp, which the cutter owns */
 };
 
 extern struct slot g_slots[NUM_SLOTS];

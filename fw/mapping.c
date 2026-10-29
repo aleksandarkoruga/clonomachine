@@ -49,7 +49,7 @@ static int32_t q16(double v) { return (int32_t)(v * 65536.0 + (v >= 0 ? 0.5 : -0
 
 static int32_t lut_rate[128], lut_pitch[128], lut_grain[128], lut_overlap[128], lut_randpitch[128];
 static int32_t lut_interval[129]; /* bend: lincurve(0..1 -> 1e-6..0.25 s, curve 5), 128 steps */
-static int32_t lut_rate_bi[128], lut_amp[128], lut_graindur_at[128]; /* Machinedrum pages */
+static int32_t lut_rate_bi[128], lut_amp[128], lut_graindur_at[128], lut_gate[128]; /* Machinedrum pages */
 
 void mapping_init(void) {
     for (int v = 0; v < 128; ++v) {
@@ -61,6 +61,7 @@ void mapping_init(void) {
         lut_randpitch[v] = q16(bilin(v, 63, 0, 127, 0, -2, 2));
         lut_rate_bi[v] = q16(bilin(v, 63, 0, 127, 1, -2, 2));
         lut_amp[v] = q16(bilin(v, 63, 0, 127, 1, 0, 2));
+        lut_gate[v] = q16(linexp(v, 1.0 / 32, 16.0)); /* bars: 1/32 .. 16, exponential */
         lut_graindur_at[v] = q16(linexp(v, 0.005, 0.5));
     }
     const double grow = d_exp(5.0), a = (0.25 - 1e-6) / (1.0 - grow), b = 1e-6 + a;
@@ -230,7 +231,8 @@ int g_md_slot0_external;
 int g_clock_follow = 1;
 static uint32_t g_midi_count;
 /* what the SC cutter sets itself while it plays voice 0: the page's values wait */
-static const uint8_t g_cutter_owns[MT_NUM] = {[MT_BUFNUM] = 1, [MT_RATE] = 1, [MT_PITCH] = 1, [MT_GATE] = 1,
+/* what the cutter sets per hit while it plays voice 0; volume (velocity) and gate stay MIDI's */
+static const uint8_t g_cutter_owns[MT_NUM] = {[MT_BUFNUM] = 1, [MT_RATE] = 1, [MT_PITCH] = 1,
                                               [MT_INTERVAL] = 1, [MT_AMP] = 1};
 
 static void pages_prepare(void) {
@@ -306,7 +308,7 @@ static void apply(int pi, int t, int v) {
     case MT_BANK: raw_param(s, P_BANK, v); break;
     case MT_RATE: raw_param(s, P_RATE, g_pg[pi].lut_rate[v]); break;
     case MT_PITCH: raw_param(s, P_PITCH, lut_pitch[v]); break;
-    case MT_GATE: raw_param(s, P_ENVBARS, (v + 1) * 2048); break;                 /* (cc+1)/32 bar */
+    case MT_GATE: raw_param(s, P_ENVBARS, lut_gate[v]); break;                    /* 1/32 .. 16 bars */
     case MT_INTERVAL: raw_param(s, P_INTERVAL, interval_from_bend(v * 128)); break; /* v/127 of the curve */
     case MT_AMP: raw_param(s, P_AMP, lut_amp[v]); break;
     case MT_OVERLAP: raw_param(s, P_OVERLAP, lut_overlap[v]); break;
@@ -325,6 +327,7 @@ static void apply(int pi, int t, int v) {
     case MT_OUT: raw_param(s, P_OUT, v * 3 / 128); break;
     case MT_REPEATS: raw_param(s, P_REPEATS, v > 126 ? 126 : v); break;
     case MT_FXSEND: break; /* reverb send: not in the gateware yet */
+    case MT_VOLUME: g_slots[s].vol_q16 = lut_amp[v]; slot_apply_output(s); break;
     default: break;
     }
 }
@@ -463,16 +466,16 @@ void mapping_midi_at(uint8_t st, uint8_t d1, uint8_t d2, uint32_t t) {
     switch (type) {
     case 0x90:
         if (d2) {
+            apply(pi, pg->vel, d2); /* velocity: volume by default, also while the cutter plays */
             if (!ext) {
                 g_pg[pi].last_note = d1;
-                apply(pi, pg->vel, d2); /* velocity: volume by default */
                 slot_note_on(s, d1, -1);
             }
             break;
         }
         /* fall through: velocity 0 = note off */
     case 0x80: /* only the note that plays: a late note-off of the previous one doesn't cut */
-        if (!ext && g_pg[pi].last_note == d1) {
+        if (!ext && pg->note_off && g_pg[pi].last_note == d1) {
             g_pg[pi].last_note = -1;
             slot_note_off(s);
         }

@@ -130,6 +130,7 @@ void slots_init(void) {
         sl->env_bars_q16 = 65536;       /* 1 bar */
         sl->interval_q16 = 6554;        /* 0.1 s (SC default) */
         sl->amp_q16 = 65536;
+        sl->vol_q16 = 65536;
         sl->algo_q16 = 65536;
         g_last_base[s] = NOT_RESIDENT;
     }
@@ -193,7 +194,8 @@ void slot_apply_grain(int s) {
 
 void slot_apply_output(int s) {
     const struct slot* sl = &g_slots[s];
-    eng_slot_write(s, SMP_R_AMP, (uint32_t)clampi(sl->amp_q16 >> 4, 0, 65535));
+    const int64_t gain = ((int64_t)sl->amp_q16 * sl->vol_q16) >> 16; /* amp x MIDI volume */
+    eng_slot_write(s, SMP_R_AMP, (uint32_t)clampi((int32_t)(gain >> 4), 0, 65535));
     eng_slot_write(s, SMP_R_ALGO_AMP, (uint32_t)clampi(sl->algo_q16 >> 1, 0, 32768));
     eng_slot_write(s, SMP_R_OUT, sl->out == 0 ? 1u : sl->out == 1 ? 2u : 3u);
 }

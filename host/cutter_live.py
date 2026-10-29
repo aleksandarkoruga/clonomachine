@@ -11,6 +11,7 @@ pitch bend below the centre, or "own" here).
 
 Keys (type + Enter):  p N  preset   |  k NAME VALUE  knob (energy density syncopation anchor
 build character release memory surprise, 0..1)  |  c 0|1  conductor manual / auto
+bars N  phrase length in bars  |  sections N  phrases per section  |
 own 0|1  hand voice 0 to the cutter / back to MIDI  |  s  status  |  q  quit
 The bridge (osc_bridge.py) must not run at the same time.
 """
@@ -69,6 +70,7 @@ def build_lib():
     lib.cutl_get_knob.argtypes = [ctypes.c_void_p, ctypes.c_int]
     lib.cutl_get_knob.restype = ctypes.c_float
     lib.cutl_conductor.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.cutl_phrase.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
     lib.cutl_state.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
     lib.cutl_moves.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int)]
     lib.cutl_move_name.restype = ctypes.c_char_p
@@ -125,7 +127,7 @@ def main():
     frames = Frames()
     hello = slip(struct.pack("<BBBBi", EV_HELLO, 0, ord("E"), ord("S"), 1))
     out = ctypes.create_string_buffer(8 * 16)
-    st = (ctypes.c_int * 8)()
+    st = (ctypes.c_int * 12)()
     t0 = time.monotonic()
     next_hello = 0
     ticks = sent = 0
@@ -164,13 +166,18 @@ def main():
                     lib.cutl_knob(c, KNOBS.index(cmd[1]), float(cmd[2]))
                 elif cmd[0] == "c" and len(cmd) > 1:
                     lib.cutl_conductor(c, int(cmd[1]))
+                elif cmd[0] == "bars" and len(cmd) > 1:
+                    lib.cutl_phrase(c, int(cmd[1]), 0)
+                elif cmd[0] == "sections" and len(cmd) > 1:
+                    lib.cutl_phrase(c, 0, int(cmd[1]))
                 elif cmd[0] == "own" and len(cmd) > 1:
                     f.write_data(b"cutter %d\r" % int(cmd[1]))
                 elif cmd[0] == "s":
                     lib.cutl_state(c, st)
                     knobs = " ".join(f"{k} {lib.cutl_get_knob(c, i):.2f}" for i, k in enumerate(KNOBS))
                     print(f"owner {st[0]} playing {st[1]} n16 {st[2]} conductor {st[3]} (state {st[4]}) "
-                          f"preset {lib.cutl_preset_name(st[5]).decode()} step {st[6]} | ticks {ticks} frames {sent}")
+                          f"preset {lib.cutl_preset_name(st[5]).decode()} step {st[6]} phrase {st[7]} bars x {st[8]} "
+                          f"| ticks {ticks} frames {sent}")
                     print(knobs)
                     mv = (ctypes.c_int * 16)()
                     n = lib.cutl_moves(c, mv)

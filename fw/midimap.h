@@ -8,7 +8,7 @@
  *     "pages": [
  *       { "channel": 5, "voice": 0, "cc": 16, "rate": [0, 4],
  *         "knobs": ["bufNum", "bank", "rate", "pitch", "gate", "interval", "repeats", "fxSend", ...],
- *         "velocity": "amp", "mw": "algo", "at": "grainDur", "pb": "cutter" },
+ *         "velocity": "volume", "noteOff": true, "mw": "algo", "at": "grainDur", "pb": "cutter" },
  *       ...
  *     ]
  *   }
@@ -30,7 +30,7 @@
 enum {
     MT_NONE, MT_BUFNUM, MT_BANK, MT_RATE, MT_PITCH, MT_GATE, MT_INTERVAL, MT_AMP, MT_OVERLAP, MT_RANDPOS,
     MT_RANDOMPITCH, MT_PROB, MT_SEPARATION, MT_MAXGRAINS, MT_TEMPOLOCK, MT_BGADVANCE, MT_ENVHOLD,
-    MT_PVTRANSIENT, MT_ALGO, MT_GRAINDUR, MT_NOTEMODE, MT_OUT, MT_CUTTER, MT_REPEATS, MT_FXSEND, MT_NUM
+    MT_PVTRANSIENT, MT_ALGO, MT_GRAINDUR, MT_NOTEMODE, MT_OUT, MT_CUTTER, MT_REPEATS, MT_FXSEND, MT_VOLUME, MT_NUM
 };
 extern const char* const mm_target_names[MT_NUM];
 
@@ -38,6 +38,7 @@ struct mm_page {
     uint8_t chan;               /* 0-based MIDI channel                    */
     uint8_t voice, cc, nknobs;
     uint8_t mw, at, pb, vel;    /* MT_* targets (vel: note-on velocity)     */
+    uint8_t note_off;           /* 1: a note-off ends the gate              */
     uint8_t knobs[MM_MAX_KNOBS];
     int32_t rate_lo, rate_hi;   /* Q16                                      */
 };
