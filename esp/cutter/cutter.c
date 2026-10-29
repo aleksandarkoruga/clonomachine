@@ -265,7 +265,7 @@ static void trig_at(struct cut_frame* f, float pos) {
     ev(f, P_POS, -1); /* Latch(pos, trig): the playhead runs on from there */
 }
 
-#define AMP 0.89f  /* -1 dB */
+#define AMP 1.0f   /* unity; only a ratchet's repeats go below, the next hit is back at 1 */
 /* one hit: buffer, volume, speeds, stutter, then the position + trigger. The gate length is the
    drum page's (MIDI): it sets how long each cut sounds, so the spacing of the silences. */
 static struct cut_frame* hit(struct cutter* c, float delay, int buf, float amp, float rate, float pitch, int repeats,
@@ -479,6 +479,7 @@ static void step32(struct cutter* c, uint32_t s, int emit) {
 /* ---- from the FPGA ------------------------------------------------------------------------- */
 static void owner_base(struct cutter* c) {
     struct cut_frame* f = frame_at(c, 0);
+    ev(f, P_AMP, 65536); /* unity */
     ev(f, P_ENVHOLD, 0);
     ev(f, P_BGADVANCE, 0);
     ev(f, P_REPEATS, 0);

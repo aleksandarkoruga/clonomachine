@@ -318,6 +318,7 @@ static void md_set_external(int on) {
         raw_param(0, P_REPEATS, 0);
         return;
     }
+    raw_param(0, P_AMP, 65536); /* unity again: a roll the cutter didn't finish can't leave it quieter */
     for (int pi = 0; pi < g_mm.npages; ++pi) /* the controls the cutter overrode come back */
         if (g_mm.page[pi].voice == 0)
             for (int t = 0; t < MT_NUM; ++t)

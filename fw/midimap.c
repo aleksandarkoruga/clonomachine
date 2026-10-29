@@ -47,11 +47,11 @@ int mm_target_of(const char* name) {
 
 /* every control on a CC (the Machinedrum's MIDI machine sends 6 at a time: its CC numbers can
    be moved along the list). The volume is on velocity, so the 7th CC (the volume's before) has
-   the stutter repeats. 24 = MM_MAX_KNOBS. */
+   the stutter repeats; amp isn't on a CC (unity, the cutter's accents). */
 static const uint8_t g_default_knobs[] = {
     MT_BUFNUM, MT_BANK,     MT_RATE,       MT_PITCH,     MT_GATE,      MT_INTERVAL,  MT_REPEATS,  MT_FXSEND, MT_OVERLAP,
     MT_RANDPOS, MT_RANDOMPITCH, MT_PROB, MT_SEPARATION, MT_MAXGRAINS, MT_TEMPOLOCK, MT_BGADVANCE, MT_ENVHOLD, MT_PVTRANSIENT,
-    MT_NOTEMODE, MT_ALGO,   MT_GRAINDUR,   MT_OUT,       MT_VOLUME,    MT_AMP};
+    MT_NOTEMODE, MT_ALGO,   MT_GRAINDUR,   MT_OUT,       MT_VOLUME};
 
 static void page_init(struct mm_page* p, int chan1, int voice, int cc, int rate_lo, int rate_hi, int pb) {
     memset(p, 0, sizeof(*p));
