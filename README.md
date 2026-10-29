@@ -27,6 +27,24 @@ revisions in use are pinned in `deps.lock`.
 | `fw/` | firmware: SD index + SDRAM cache, tempo/slot logic, USB-MIDI host + MIDI pages (`/midimap.json`), Monomachine map, shell |
 | `host/` | loader, console, flash script, OSC bridge, SuperCollider example |
 
+## Break cutter (ESP32, PC stand-in)
+
+`esp/cutter/` is the procedural break cutter (portable C): metric weight x tension -> how far a
+hit moves from the loop -> a move from a palette (reorder, repeat, mangle, texture, silence),
+phrase memory, release, an optional conductor. It will run on the on-board ESP32; until then the
+PC stands in over the console with the same protocol (`esp sim 1`, Machinedrum-synced ticks):
+
+```bash
+python host/cutter_live.py --preset 2           # p N, k energy 0.7, c 1, own 1, s, q
+build/host/cutter_sim 2 8 173.5 -q              # offline: move histogram per preset
+```
+
+It plays voice 0 only while it owns it (drum page pitch bend below the centre, or `cutter 1`).
+MIDI channel 7 (`cutterChannel`) goes to it: CC 16.. energy density syncopation anchor build
+character release memory surprise, mod wheel = release, notes = presets, pitch bend above the
+centre = the conductor plays the form. The drum page's sample knob picks the cutter's sample.
+Presets: straight, edits, jungle, drill, tape, v13, texture.
+
 ## Build / run
 
 ```bash

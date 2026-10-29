@@ -16,8 +16,9 @@
  * FPGA -> ESP, only while the link is up (before that the ESP may sit in its ROM or a stock
  * MicroPython prompt, which must not get bytes): EV_TICK on every 32nd (from the MIDI clock
  * while it runs, from the engine's beat otherwise), EV_BPM, EV_START / EV_STOP, EV_OWNER and
- * the MIDI messages of the cutter channel (midimap.json "cutterChannel"); bpm and owner again
- * once a second so a restarted ESP catches up.
+ * the MIDI messages of the cutter channel (midimap.json "cutterChannel"), EV_LOAD_BUF with the
+ * drum page's sample knob (the cutter's base sample); bpm, owner and base sample again once a
+ * second so a restarted ESP catches up.
  */
 #include "esplink.h"
 
@@ -45,7 +46,7 @@ static uint32_t g_ring_r, g_ring_w;
 enum { ESP, SIM, NPATHS }; /* the ESP's UART, the PC on the console ("esp sim 1") */
 static struct {
     int up, playing, stopped, have_step; /* up: either path; stopped: a Stop came, no Start since */
-    int sim, path_up[NPATHS], n16;
+    int sim, path_up[NPATHS], n16, base_buf; /* base_buf: drum page sample knob + 1, 0 unset */
     uint32_t hello_at[NPATHS], refresh_at, midi_at, version;
     uint32_t step, last_x;
     uint32_t tx_frames, tx_drops, dropped, ring_drops, ticks;
@@ -102,6 +103,8 @@ static void send_state(void) {
     send1(EV_BPM, 0, 0, 0, (int32_t)g_bpm_milli);
     g.n16 = (int)slot_sixteenths(0);
     send1(EV_OWNER, 0, 0, (uint8_t)g_md_slot0_external, g.n16);
+    if (g.base_buf > 0)
+        send1(EV_LOAD_BUF, 0, 0, (uint8_t)(g.base_buf - 1), 0);
 }
 
 static void tick(uint32_t step, int source) {
@@ -214,6 +217,11 @@ void esplink_transport(int start) {
     send1(start ? EV_START : EV_STOP, 0, 0, 0, 0);
 }
 
+void esplink_base_buf(int buf) {
+    g.base_buf = buf + 1;
+    send1(EV_LOAD_BUF, 0, 0, (uint8_t)buf, 0);
+}
+
 void esplink_owner(int slot, int cutter) {
     send1(EV_OWNER, 0, (uint8_t)slot, (uint8_t)cutter, slot == 0 ? (int32_t)slot_sixteenths(0) : 0);
 }
@@ -250,6 +258,7 @@ void esplink_drain(void) {}
 void esplink_midi_tick(uint32_t x) { (void)x; }
 void esplink_transport(int start) { (void)start; }
 void esplink_owner(int slot, int cutter) { (void)slot; (void)cutter; }
+void esplink_base_buf(int buf) { (void)buf; }
 void esplink_forward_midi(uint8_t st, uint8_t d1, uint8_t d2) { (void)st; (void)d1; (void)d2; }
 void esplink_status(void) { printf("esp: no ESP UART in this gateware\n"); }
 int esplink_sim(void) { return 0; }

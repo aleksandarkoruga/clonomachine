@@ -12,6 +12,7 @@ void esplink_drain(void);                   /* inside SD reads: buffer received 
 void esplink_midi_tick(uint32_t x);         /* MIDI clock index since start (lost ticks in)   */
 void esplink_transport(int start);          /* start / stop, from any source                  */
 void esplink_owner(int slot, int cutter);   /* who plays the slot: the cutter or MIDI         */
+void esplink_base_buf(int buf);             /* voice 0's sample knob: the cutter's base sample */
 void esplink_forward_midi(uint8_t st, uint8_t d1, uint8_t d2); /* the cutter's MIDI channel */
 void esplink_status(void);                  /* console "esp"                                  */
 int esplink_sim(void);                      /* "esp sim 1": the PC stands in for the ESP         */

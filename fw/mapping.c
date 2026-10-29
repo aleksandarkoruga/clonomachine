@@ -292,6 +292,8 @@ static void apply(int pi, int t, int v) {
     if (t <= MT_NONE || t >= MT_NUM || s >= NUM_SLOTS)
         return;
     g_pg[pi].last[t] = (int8_t)v;
+    if (t == MT_BUFNUM && s == 0)
+        esplink_base_buf(v); /* the cutter plays from the sample this knob picks */
     if (t == MT_CUTTER) {
         if (s == 0)
             md_set_external(v < 64);
