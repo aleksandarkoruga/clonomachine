@@ -160,7 +160,9 @@ table.
   the board's map as tables (CC -> control per page, the reverb page, the cutter's channel),
   edit, warnings for clashes, "Send to board" (the board checks it, saves it, keeps the old one as
   `/midimap.json.bak`, uses it at once), export / import, live MIDI (the rows light up). It holds
-  the console like the other tools; `--mock` works without the board.
+  the console like the other tools; `--mock` works without the board. `host/midimap-ui start`
+  (runs it in the background if it isn't running, opens Brave) / `host/midimap-ui stop` (frees the
+  console); the menu shortcuts "Sampler MIDI Map" / "Sampler MIDI Map Stop" call these.
 - Console: `usb`, `usbdesc`, `midimon 1` (decoded) / `2` (raw, timestamped) / `3` (raw incl.
   clock), `midimap [reload]`, `midiin <st> <d1> <d2>` (hex).
 

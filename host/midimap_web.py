@@ -16,6 +16,7 @@ import json
 import os
 import queue
 import re
+import signal
 import sys
 import threading
 import time
@@ -261,7 +262,11 @@ def main():
     except Exception as e:
         sys.exit(f"the board doesn't answer on the console ({e}); is another tool holding it?")
     srv = ThreadingHTTPServer(("127.0.0.1", a.port), make_handler(board))
-    print(f"MIDI map editor: http://localhost:{a.port}   (Ctrl-C to stop)")
+
+    def stop(*_):  # host/midimap-ui stop: end like Ctrl-C (the board's MIDI monitor off)
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stop)
+    print(f"MIDI map editor: http://localhost:{a.port}   (Ctrl-C to stop)", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

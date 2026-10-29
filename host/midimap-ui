@@ -1,0 +1,39 @@
+#!/bin/bash
+# midimap-ui [start|stop]   start (default): run the MIDI map editor (host/midimap_web.py) if it
+#                           isn't running and open it in Brave. stop: end it, the board's console
+#                           is free again for the other tools. The menu shortcuts "Sampler MIDI
+#                           Map" / "Sampler MIDI Map Stop" call this.
+D="$(cd "$(dirname "$0")/.." && pwd)"
+LOG="$D/build/midimap_web.log"; URL="http://127.0.0.1:8765"
+note() { command -v notify-send >/dev/null && notify-send "Sampler MIDI map" "$1"; echo "$1"; }
+up() { curl -sf -m 2 "$URL/" >/dev/null 2>&1; }
+PAT='^\.venv/bin/python3 -u host/midimap_web\.py'   # the editor's own command line (setsid forks)
+running() { pgrep -f "$PAT" >/dev/null; }
+
+case "${1:-start}" in
+  start)
+    if ! up; then
+      mkdir -p "$D/build"
+      cd "$D"
+      setsid nohup .venv/bin/python3 -u host/midimap_web.py >>"$LOG" 2>&1 < /dev/null &
+      sleep 0.5
+      for _ in $(seq 1 30); do up && break; running || break; sleep 0.5; done
+      if ! up; then
+        msg="$(tail -n 1 "$LOG")"
+        note "The editor didn't start: ${msg:-see $LOG} (board on USB? another tool holding its console?)"
+        exit 1
+      fi
+    fi
+    if command -v brave >/dev/null; then exec brave "$URL" >/dev/null 2>&1; else exec xdg-open "$URL"; fi
+    ;;
+  stop)
+    if running; then
+      pkill -f "$PAT"
+      for _ in $(seq 1 20); do running || break; sleep 0.2; done
+      note "MIDI map editor stopped, the board's console is free"
+    else
+      note "The MIDI map editor wasn't running"
+    fi
+    ;;
+  *) echo "usage: $0 [start|stop]"; exit 1 ;;
+esac
