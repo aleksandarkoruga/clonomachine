@@ -73,15 +73,22 @@ static void set_targets(struct rv_ctl* c) {
     }
 }
 
+/* each rail's glide: lag mode keeps (1 - coef)^256 of the distance per block, constant rate
+   moves 256 / (seconds fs) octaves. Powers of two from the table, no soft exp per rail. */
 static void set_lag(struct rv_ctl* c) {
     const double spread = 2 * d_log2(1 + (c->p.rand2 > 0 ? q16d(c->p.rand2) : 0));
+    const int32_t spread_q16 = (int32_t)(spread * 65536.0);
     const double glide = c->p.glide > 0 ? q16d(c->p.glide) : 0;
     for (int r = 0; r < RV_RAILS; ++r) {
-        const double seconds = glide * d_exp2(spread * q16d(c->rand2[r]));
+        const int32_t e = (int32_t)(((int64_t)spread_q16 * c->rand2[r]) >> 16); /* octaves, Q16 */
+        const double f = e >= 0 ? exp2_frac_q30(c, (uint32_t)(e & 0xFFFF)) * (double)(1u << (e >> 16)) / 1073741824.0
+                                : exp2_neg_q30(c, -(int64_t)e) / 1073741824.0;
+        const double seconds = glide * f;
         if (c->p.glide_mode) /* octaves per block */
             c->lag[r] = seconds > 0 ? Q16(BLOCK / (seconds * c->fs)) : 0x7FFFFFFF;
-        else                 /* what's left of the distance after a block: (1 - coef)^256 */
-            c->lag[r] = seconds > 0 ? (int32_t)(d_exp(-LN1000 * BLOCK / (seconds * c->fs)) * 1073741824.0) : 0;
+        else                 /* 0.001^(256 / (seconds fs)) = 2^-(log2(1000) 256 / (seconds fs)) */
+            c->lag[r] = seconds > 0 ? (int32_t)exp2_neg_q30(c, (int64_t)(9.965784284662087 * BLOCK / (seconds * c->fs) * 65536.0))
+                                    : 0;
     }
 }
 
