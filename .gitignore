@@ -18,3 +18,6 @@ __pycache__/
 /model/*.o
 *.vcd
 *.fst
+
+# local notes, not part of the repo
+/ULX3S_Sampler_Handoff.md
