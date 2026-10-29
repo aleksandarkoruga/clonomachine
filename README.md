@@ -156,6 +156,11 @@ table.
   or a DIN opto input on a GPIO).
 - The host keeps 8 IN transfers queued and also collects them inside SD reads (time-stamped),
   so loading banks doesn't drop or delay-stamp MIDI.
+- **Editor in the browser:** `.venv/bin/python3 host/midimap_web.py`, then http://localhost:8765:
+  the board's map as tables (CC -> control per page, the reverb page, the cutter's channel),
+  edit, warnings for clashes, "Send to board" (the board checks it, saves it, keeps the old one as
+  `/midimap.json.bak`, uses it at once), export / import, live MIDI (the rows light up). It holds
+  the console like the other tools; `--mock` works without the board.
 - Console: `usb`, `usbdesc`, `midimon 1` (decoded) / `2` (raw, timestamped) / `3` (raw incl.
   clock), `midimap [reload]`, `midiin <st> <d1> <d2>` (hex).
 
