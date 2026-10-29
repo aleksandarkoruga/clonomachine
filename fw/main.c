@@ -16,9 +16,10 @@
 #include "samples.h"
 #include "slip.h"
 #include "slot.h"
+#include "esplink.h"
 #include "usbh.h"
 
-static struct slip g_slip_console, g_slip_esp;
+static struct slip g_slip_console;
 extern volatile unsigned int uart_rx_overflows; /* fw/uart.c */
 static uint32_t g_cin_drops;
 
@@ -26,7 +27,10 @@ static void dispatch(const struct slip* d) {
     for (unsigned i = 0; i + 8 < d->len; i += 8) {
         struct smp_event e;
         memcpy(&e, d->buf + i, 8);
-        mapping_event(&e);
+        if (esplink_sim())
+            esplink_sim_event(&e); /* the PC standing in for the ESP: its rules apply */
+        else
+            mapping_event(&e);
     }
 }
 
@@ -44,11 +48,10 @@ static void cmd_status(void) {
            (unsigned long)eng_status(SMP_SG_CYCLES), (unsigned long)eng_status(SMP_SG_CYCLES_MAX),
            ENGINE_CYCLES_PER_SAMPLE, (unsigned long)eng_status(SMP_SG_SAMPLES),
            (unsigned long)eng_status(SMP_SG_REQ_DROPS), (unsigned long)eng_status(SMP_SG_PV_MISSES));
-    printf("beat %lu  links: console %lu frames / %lu bad / %lu rx overflows, esp %lu frames / %lu bad\n",
+    printf("beat %lu  console link %lu frames / %lu bad / %lu rx overflows\n",
            (unsigned long)eng_status(SMP_SG_BEAT_HI), (unsigned long)g_slip_console.frames,
-           (unsigned long)g_slip_console.crc_errors, (unsigned long)(uart_rx_overflows + g_cin_drops),
-           (unsigned long)g_slip_esp.frames,
-           (unsigned long)g_slip_esp.crc_errors);
+           (unsigned long)g_slip_console.crc_errors, (unsigned long)(uart_rx_overflows + g_cin_drops));
+    esplink_status();
     for (int s = 0; s < NUM_SLOTS; ++s) {
         const struct slot* sl = &g_slots[s];
         printf("slot %d: lib %d bank %d buf %d  phasor %lu  grains %lu  gate %lu  misses %lu  ratio ", s, sl->lib, sl->bank, sl->buf,
@@ -102,6 +105,7 @@ static void help(void) {
          "trig <slot> [pos] | note <slot> <note> [vel] | set <slot> <param> <value> | gatetest <slot>\n"
          "dsm <0|1> | norm <0|1> | verbose <0|1> | reset\n"
          "usb | usbdesc | midimon <0|1|2 raw|3 raw+clocks> | usbpull <0 pull-downs|1 released> | clock <0|1> (follow MIDI clock)\n"
+         "esp [sim <0|1>] (link to the ESP32 cutter; sim: the PC stands in on this console) | cutter <0|1> (voice 0 played by the cutter / MIDI)\n"
          "midimap [reload|defaults] (MIDI pages from /midimap.json) | midiin <status> <d1> <d2> (hex, as from USB)");
     fputs("params:", stdout);
     for (int p = 0; p < P_NUM_PARAMS; ++p)
@@ -157,6 +161,9 @@ static void shell_line(char* line) {
     else if (!strcmp(c, "reset")) ctrl_reset_write(1);
     else if (!strcmp(c, "usb")) { usbh_status(); mapping_midi_status(); }
     else if (!strcmp(c, "usbdesc")) usbh_descriptors();
+    else if (!strcmp(c, "esp") && argc > 2 && !strcmp(argv[1], "sim")) esplink_set_sim(atoi(argv[2]));
+    else if (!strcmp(c, "esp")) esplink_status();
+    else if (!strcmp(c, "cutter") && argc > 1) mapping_set_cutter(atoi(argv[1]));
     else if (!strcmp(c, "midimap")) {
         if (argc > 1 && !strcmp(argv[1], "defaults")) mapping_midimap_defaults();
         else if (argc > 1) mapping_midimap_load();
@@ -268,6 +275,7 @@ static void route_byte(uint8_t c, int in_loader) {
 static void io_drain(void) {
     console_drain();
     usbh_service();
+    esplink_drain();
 }
 
 /* samples_idle_hook: called by the loader between slices of work */
@@ -281,16 +289,6 @@ static void console_pump(void) {
     }
 }
 
-static void poll_esp(void) {
-#ifdef CSR_ESP_UART_BASE
-    for (int n = 0; n < 64 && !esp_uart_rxempty_read(); ++n) {
-        const uint8_t c = (uint8_t)esp_uart_rxtx_read();
-        esp_uart_ev_pending_write(UART_EV_RX);
-        if (slip_feed(&g_slip_esp, c))
-            dispatch(&g_slip_esp);
-    }
-#endif
-}
 
 int main(void) {
 #ifdef CONFIG_CPU_HAS_INTERRUPT
@@ -349,7 +347,7 @@ int main(void) {
             g_cin_r = (g_cin_r + 1) & (sizeof(g_cin) - 1);
             route_byte(c, 0);
         }
-        poll_esp();
+        esplink_poll();
         usbh_poll();
         samples_poll();
         slots_service();

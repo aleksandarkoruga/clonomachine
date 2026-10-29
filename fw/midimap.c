@@ -48,6 +48,7 @@ static void page_init(struct mm_page* p, int chan1, int voice, int cc, int rate_
 void midimap_defaults(struct midimap* m) {
     memset(m, 0, sizeof(*m));
     m->clock_follow = 1;
+    m->cutter_chan = 7; /* the cutter's structure controls (on the ESP) */
     page_init(&m->page[0], 5, 0, 16, 0, 4, MT_CUTTER);    /* Machinedrum MIDI machine on channel 5: drums */
     page_init(&m->page[1], 3, 1, 16, -2, 2, MT_NOTEMODE); /* channel 3: melody */
     page_init(&m->page[2], 6, 2, 25, -2, 2, MT_NOTEMODE); /* channel 6: third voice */
@@ -133,11 +134,19 @@ int midimap_parse(struct midimap* m, const char* buf, int len, char* err, int er
     int first = 1;
     memset(&t, 0, sizeof(t));
     t.clock_follow = 1;
+    t.cutter_chan = 7;
     err[0] = 0;
     json_init(&j, buf, len);
     while (json_member(&j, &first, key, sizeof(key))) {
         if (name_eq(key, "clockFollow"))
             json_bool(&j, &t.clock_follow);
+        else if (name_eq(key, "cutterChannel")) {
+            json_int(&j, &t.cutter_chan);
+            if (t.cutter_chan < 0 || t.cutter_chan > 16) {
+                snprintf(err, (size_t)errn, "cutterChannel: 1..16 (0: none)");
+                j.err = 1;
+            }
+        }
         else if (name_eq(key, "pages")) {
             int f = 1;
             while (json_element(&j, &f)) {
@@ -185,12 +194,14 @@ int midimap_write(const struct midimap* m, char* buf, int n) {
     OUT("  \"_comment\": \"MIDI pages for the ULX3S sampler. channel: 1-16 as the instrument shows it; "
         "voice: 0 drums, 1 melody, 2 third voice; cc: first CC of the page, the knobs follow on "
         "consecutive CCs; rate: range of the rate knob (63 = 1); velocity / mw / at / pb: a note's velocity, "
-        "mod wheel, channel aftertouch, pitch bend (its coarse 7 bits). Controls: ");
+        "mod wheel, channel aftertouch, pitch bend (its coarse 7 bits); cutterChannel: MIDI channel "
+        "passed on to the break cutter on the ESP32 (0: none). Controls: ");
     for (int t = 0; t < MT_NUM; ++t)
         OUT("%s%s", mm_target_names[t], t + 1 < MT_NUM ? " " : "");
     OUT(". gate = (cc+1)/32 bar; repeats: stutter retriggers per note; fxSend: reverb send; cutter: below the "
-        "centre hands voice 0 to OSC (the SC cutter).\",\n");
+        "centre hands voice 0 to the cutter (ESP32 or OSC).\",\n");
     OUT("  \"clockFollow\": %s,\n", m->clock_follow ? "true" : "false");
+    OUT("  \"cutterChannel\": %d,\n", m->cutter_chan);
     OUT("  \"pages\": [\n");
     for (int i = 0; i < m->npages; ++i) {
         const struct mm_page* p = &m->page[i];

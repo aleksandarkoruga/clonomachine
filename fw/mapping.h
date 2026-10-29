@@ -17,6 +17,7 @@ void mapping_midimap_print(void);
 void mapping_midimap_defaults(void); /* /midimap.json -> .bak, the defaults written + used */
 extern int g_clock_follow;           /* 1: MIDI clock sets the global bpm                 */
 extern int g_md_slot0_external;      /* pitch bend 'cutter' below the centre: voice 0 is
-                                        played from OSC (the SC cutter), MIDI notes ignored */
+                                        played by the cutter (ESP32 or OSC), MIDI notes ignored */
+void mapping_set_cutter(int on);     /* the same by hand (console "cutter") */
 
 #endif

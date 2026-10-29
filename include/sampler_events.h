@@ -25,7 +25,12 @@ enum {
     EV_START     = 7,
     EV_STOP      = 8,
     EV_RAW_PARAM = 9,   /* a = slot, b = param id (P_*), value = x * 2^frac (see below)  */
-    EV_LOAD_BUF  = 10   /* a = slot, b = buffer index in the slot's bank                 */
+    EV_LOAD_BUF  = 10,  /* a = slot, b = buffer index in the slot's bank                 */
+    /* FPGA <-> on-board ESP32 (fw/esplink.c) */
+    EV_TICK      = 11,  /* FPGA -> ESP: a 32nd. value = step (since start), chan = source
+                           (0 engine beat, 1 MIDI clock), a = flags (bit 0 playing)         */
+    EV_OWNER     = 12,  /* FPGA -> ESP: a = slot, b = 1 the cutter plays it, 0 MIDI does    */
+    EV_HELLO     = 13   /* ESP -> FPGA, every <= 1 s: value = protocol version (1)          */
 };
 
 struct __attribute__((packed)) smp_event {

@@ -2,6 +2,8 @@
  * RAW_PARAM namespace (/slot/<n>/<param>). MIDI channels are SC's 0-based numbers. */
 #include "mapping.h"
 
+#include "esplink.h"
+
 #include <stdio.h>
 
 #include "engine.h"
@@ -187,11 +189,13 @@ void mapping_event(const struct smp_event* e) {
         set_global_bpm((uint32_t)e->value);
         break;
     case EV_START: /* beat counter and every background playhead restart together */
+        esplink_transport(1);
         eng_write(SMP_ADDR(SMP_GLOBAL_SLOT, SMP_G_BEAT_CTRL), 1);
         for (int i = 0; i < NUM_SLOTS; ++i)
             eng_slot_write(i, SMP_R_STROBE, SMP_STROBE_BG_RESET);
         break;
     case EV_STOP: /* transport stop: every voice's gate closes (1 ms ramp) */
+        esplink_transport(0);
         for (int i = 0; i < NUM_SLOTS; ++i)
             eng_slot_write(i, SMP_R_STROBE, SMP_STROBE_GATE_OFF);
         break;
@@ -327,7 +331,8 @@ static void md_set_external(int on) {
     if (on == g_md_slot0_external)
         return;
     g_md_slot0_external = on;
-    printf("voice 0: %s\n", on ? "played from OSC (cutter), its MIDI notes ignored" : "MIDI");
+    printf("voice 0: %s\n", on ? "played by the cutter, its MIDI notes ignored" : "MIDI");
+    esplink_owner(0, on);
     if (on) { /* no MIDI stutter left over */
         raw_param(0, P_REPEATS, 0);
         return;
@@ -374,6 +379,7 @@ static void clock_tick(uint32_t t) {
     g_clk_last = t;
     g_clk_ring[n & 127] = t;
     g_clk_x[n & 127] = x;
+    esplink_midi_tick(x);
     if (n < 47 || (n + 1) % 24)
         return;
     const uint32_t m = n + 1 < 96 ? n + 1 : 96, i0 = n + 1 - m;
@@ -424,6 +430,10 @@ void mapping_midi_at(uint8_t st, uint8_t d1, uint8_t d2, uint32_t t) {
     if (st < 0x80 || st >= 0xF0)
         return;
     const int type = st & 0xF0, chan = st & 0xF;
+    if (g_mm.cutter_chan && chan == g_mm.cutter_chan - 1) { /* the cutter's channel: to the ESP */
+        esplink_forward_midi(st, d1, d2);
+        return;
+    }
     int pi = -1;
     for (int i = 0; i < g_mm.npages && pi < 0; ++i)
         if (g_mm.page[i].chan == chan)
@@ -494,3 +504,5 @@ void mapping_midi_status(void) {
     printf(" (follow %s)  voice 0 %s  %d pages\n", g_clock_follow ? "on" : "off",
            g_md_slot0_external ? "external (cutter)" : "MIDI", g_mm.npages);
 }
+
+void mapping_set_cutter(int on) { md_set_external(!!on); }

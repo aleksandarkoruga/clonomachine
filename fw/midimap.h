@@ -4,7 +4,7 @@
  * host/test_midimap.c). Example of the file:
  *
  *   {
- *     "clockFollow": true,
+ *     "clockFollow": true, "cutterChannel": 7,
  *     "pages": [
  *       { "channel": 5, "voice": 0, "cc": 16, "rate": [0, 4],
  *         "knobs": ["bufNum", "bank", "rate", "pitch", "gate", "interval", "repeats", "fxSend", ...],
@@ -44,6 +44,7 @@ struct mm_page {
 
 struct midimap {
     int npages, clock_follow;
+    int cutter_chan;            /* 1..16: MIDI channel forwarded to the ESP's cutter, 0 none */
     struct mm_page page[MM_MAX_PAGES];
 };
 
