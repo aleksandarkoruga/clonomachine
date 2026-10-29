@@ -21,7 +21,8 @@ struct Params {
 class Ref {
 public:
     static constexpr int NX = 2, NY = 2, NJ = NX * NY, NR = NJ * 4;
-    explicit Ref(double fs = 48000.0, uint32_t seed = 1);
+    // starts at p (like a synth created with these arguments: no glide from the defaults)
+    explicit Ref(double fs = 48000.0, uint32_t seed = 1, const Params& p = Params());
     void set(const Params& p);  // like the UGen's control inputs, any time
     void process(const float* in, float* outL, float* outR, int n);
 

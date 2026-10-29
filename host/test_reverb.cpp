@@ -91,8 +91,7 @@ struct Run {
 
 static Run run(const std::vector<float>& in, const pmw::Params& P, uint32_t seed) {
     Run r;
-    pmw::Ref ref(FS, seed);
-    ref.set(P);
+    pmw::Ref ref(FS, seed, P);
     rv_params rp;
     rp.decay = (int32_t)lrint(P.decay * 65536), rp.time = (int32_t)lrint(P.time * 65536);
     rp.glide = (int32_t)lrint(P.glide * 65536), rp.hf_decay = (int32_t)lrint(P.hfDecay * 65536);

@@ -126,6 +126,8 @@ class Sampler(LiteXModule):
             p_PV_SIN_HEX  = os.path.join(RTL_DIR, "pv_sin.hex"),
             p_PV_ATAN_HEX = os.path.join(RTL_DIR, "pv_atan.hex"),
             p_PV_WIN_HEX  = os.path.join(RTL_DIR, "pv_win.hex"),
+            p_RV_T0_HEX   = os.path.join(RTL_DIR, "rv_t0.hex"),
+            p_RV_T1_HEX   = os.path.join(RTL_DIR, "rv_t1.hex"),
             i_clk        = ClockSignal(cd_audio),
             i_rst        = rst,
             i_cmd_valid  = cmd_fifo.source.valid,
@@ -157,4 +159,5 @@ class Sampler(LiteXModule):
             )
         platform.add_source(os.path.join(RTL_DIR, "sampler_engine.v"))
         platform.add_source(os.path.join(RTL_DIR, "pv_unit.v"))
+        platform.add_source(os.path.join(RTL_DIR, "reverb_unit.v"))
         platform.add_source(os.path.join(RTL_DIR, "dsm_dac.v"))

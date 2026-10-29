@@ -17,7 +17,7 @@ constexpr int kInput = 0, kPickupL = 1 * Ref::NY + Ref::NY / 2, kPickupR = 0 * R
 inline float clampf(float x, float lo, float hi) { return x < lo ? lo : (x > hi ? hi : x); }
 }  // namespace
 
-Ref::Ref(double fs, uint32_t seed) : fs_(fs) {
+Ref::Ref(double fs, uint32_t seed, const Params& p) : fs_(fs), p_(p) {
     rng_.s = seed ? seed : 1;
     const double longest = kMaxRailTime * fs;
     bufLength_ = 1;

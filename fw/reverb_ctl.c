@@ -36,6 +36,26 @@ void rv_defaults(struct rv_params* p) {
     p->glide_mode = 0;
 }
 
+/* 2^(x/65536), x in [0, 65536] -> Q30 (the table, interpolated) */
+static uint32_t exp2_frac_q30(const struct rv_ctl* c, uint32_t x) {
+    const uint32_t k = x >> 8, fr = x & 0xFF;
+    if (k >= 256)
+        return c->exp_tab[256];
+    return c->exp_tab[k] + (uint32_t)(((uint64_t)(c->exp_tab[k + 1] - c->exp_tab[k]) * fr) >> 8);
+}
+
+/* 2^-a, a >= 0 Q16 -> Q30 */
+static uint32_t exp2_neg_q30(const struct rv_ctl* c, int64_t a) {
+    if (a <= 0)
+        return 1u << 30;
+    const int64_t n = a >> 16;
+    if (n >= 30)
+        return 0;
+    const uint32_t f = (uint32_t)(a & 0xFFFF);
+    const uint32_t m = f ? exp2_frac_q30(c, 65536 - f) >> 1 : 1u << 30; /* 2^-f = 2^(1-f) / 2 */
+    return m >> n;
+}
+
 /* 2^x, x log2(samples) Q16 -> samples Q20 */
 static uint32_t exp2_q20(const struct rv_ctl* c, int32_t x) {
     const int32_t i = x >> 16;
@@ -66,17 +86,27 @@ static void set_lag(struct rv_ctl* c) {
 }
 
 /* Jot: a rail D samples long gets g(1-b)/(1-b z^-1) with |H(0)| = 10^(-3D/(fs decay)) and
-   |H(pi)| = 10^(-3D/(fs hfDecay)), so T60 doesn't depend on the plate's size */
+   |H(pi)| = 10^(-3D/(fs hfDecay)), so T60 doesn't depend on the plate's size. In powers of two:
+   10^(-3D/(fs T)) = 2^(-log2(1000) D / (fs T)). Integer per entry (a knob turn costs a few ms
+   on the soft core, double exp would cost ~100); hfDecay is kept <= decay (the pole stays >= 0,
+   which is all the unit takes). */
 static void set_loss(struct rv_ctl* c) {
-    const double dec = q16d(c->p.decay), hf = q16d(c->p.hf_decay);
-    const double kLo = -LN1000 / (c->fs * (dec < 0.01 ? 0.01 : dec > 1000 ? 1000 : dec));
-    const double kHi = -LN1000 / (c->fs * (hf < 0.001 ? 0.001 : hf > 1000 ? 1000 : hf));
-    const double lmin = q16d(c->log_min), lmax = q16d(c->log_max);
+    double dec = q16d(c->p.decay), hf = q16d(c->p.hf_decay);
+    dec = dec < 0.01 ? 0.01 : dec > 1000 ? 1000 : dec;
+    hf = hf < 0.001 ? 0.001 : hf > dec ? dec : hf;
+    const double log2_1000 = 9.965784284662087;
+    /* octaves (Q16) per sample of rail length, scaled by 2^24; D goes in as Q12 (< 2^23), so
+       the product stays below 2^61 for decays down to 10 ms and hfDecay down to 1 ms */
+    const uint64_t k_lo = (uint64_t)(log2_1000 / (c->fs * dec) * 65536.0 * 16777216.0 + 0.5);
+    const uint64_t k_d = (uint64_t)(log2_1000 * (1 / hf - 1 / dec) / c->fs * 65536.0 * 16777216.0 + 0.5);
     for (int i = 0; i <= 256; ++i) {
-        const double D = d_exp2(lmin + i * (lmax - lmin) / 256);
-        const double rr = d_exp((kHi - kLo) * D), b = (1 - rr) / (1 + rr);
-        c->gain_tab[i] = (int32_t)(d_exp(kLo * D) * (1 - b) * 131072.0 + 0.5);
-        c->pole_tab[i] = (int32_t)(b * 131072.0 + 0.5);
+        const int32_t L = c->log_min + (int32_t)(((int64_t)(c->log_max - c->log_min) * i) >> 8);
+        const uint64_t D = exp2_q20(c, L) >> 8;                          /* Q12 samples */
+        const uint32_t g_lo = exp2_neg_q30(c, (int64_t)((D * k_lo) >> 36));   /* |H(0)|, Q30 */
+        const uint32_t r = exp2_neg_q30(c, (int64_t)((D * k_d) >> 36));       /* |H(pi)|/|H(0)| */
+        const uint64_t b = ((((uint64_t)1 << 30) - r) << 17) / (((uint64_t)1 << 30) + r); /* Q17 */
+        c->pole_tab[i] = (int32_t)b;
+        c->gain_tab[i] = (int32_t)(((uint64_t)g_lo * ((1u << 17) - b) + ((uint64_t)1 << 29)) >> 30);
     }
 }
 
