@@ -27,6 +27,21 @@ revisions in use are pinned in `deps.lock`.
 | `fw/` | firmware: SD index + SDRAM cache, tempo/slot logic, USB-MIDI host + MIDI pages (`/midimap.json`), Monomachine map, shell |
 | `host/` | loader, console, flash script, OSC bridge, SuperCollider example |
 
+## Plate reverb
+
+The PMWave UGen (github.com/aleksandarkoruga/pmwave) as a 2x2 plate (16 waveguide rails up to 40 ms) in the gateware
+(`rtl/reverb_unit.v`, bit-exact with `model/reverb_model.cpp`; `model/pmwave_ref.cpp` is the float
+original): every voice has a send (`fxSend`), the plate comes back on the right output only, so the
+drums stay alone on the left. The soft core runs its control every 256 samples
+(`fw/reverb_ctl.c`: glide, wander, decay tables), MIDI channel 8 is its page (all controls on CCs
+16..27: size decay damp diffusion wander return send0 send1 send2 glide spread glideMode), the
+console has `rev [<control> <0..127>]`.
+
+```bash
+build/host/test_reverb loop.wav 4 1 0.3 0.25 0.005  # float vs fixed, WAVs in build/reverb/
+cd sim && make reverbrun                             # unit vs model, sample by sample
+```
+
 ## Break cutter (on-board ESP32)
 
 `esp/cutter/` is the procedural break cutter (portable C): metric weight x tension -> how far a

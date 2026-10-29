@@ -5,6 +5,7 @@
  *
  *   {
  *     "clockFollow": true, "cutterChannel": 7,
+ *     "reverb": { "channel": 8, "cc": 16, "knobs": ["size", "decay", ...], "mw": "glide" },
  *     "pages": [
  *       { "channel": 5, "voice": 0, "cc": 16, "rate": [0, 4],
  *         "knobs": ["bufNum", "bank", "rate", "pitch", "gate", "interval", "repeats", "fxSend", ...],
@@ -43,7 +44,23 @@ struct mm_page {
     int32_t rate_lo, rate_hi;   /* Q16                                      */
 };
 
+/* the plate reverb's controls (channel page "reverb", fw/reverb.c) */
+enum {
+    RK_NONE, RK_SIZE, RK_DECAY, RK_DAMP, RK_DIFFUSION, RK_WANDER, RK_RETURN, RK_GLIDE, RK_SPREAD, RK_GLIDEMODE,
+    RK_SEND0, RK_SEND1, RK_SEND2, RK_NUM
+};
+extern const char* const rk_names[RK_NUM];
+int rk_of(const char* name); /* -1 if unknown */
+
+struct mm_reverb {
+    uint8_t chan;               /* 0-based MIDI channel, 0xFF none          */
+    uint8_t cc, nknobs;
+    uint8_t knobs[MM_MAX_KNOBS];
+    uint8_t mw, at, pb;         /* RK_* targets                             */
+};
+
 struct midimap {
+    struct mm_reverb reverb;
     int npages, clock_follow;
     int cutter_chan;            /* 1..16: MIDI channel forwarded to the ESP's cutter, 0 none */
     struct mm_page page[MM_MAX_PAGES];

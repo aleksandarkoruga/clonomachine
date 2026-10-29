@@ -17,6 +17,8 @@
 #include "slip.h"
 #include "slot.h"
 #include "esplink.h"
+#include "midimap.h" /* rk_of */
+#include "reverb.h"
 #include "usbh.h"
 
 static struct slip g_slip_console;
@@ -105,6 +107,7 @@ static void help(void) {
          "trig <slot> [pos] | note <slot> <note> [vel] | set <slot> <param> <value> | gatetest <slot>\n"
          "dsm <0|1> | norm <0|1> | verbose <0|1> | reset\n"
          "usb | usbdesc | midimon <0|1|2 raw|3 raw+clocks> | usbpull <0 pull-downs|1 released> | clock <0|1> (follow MIDI clock)\n"
+         "rev [<control> <0..127>] (plate reverb: size decay damp diffusion wander return glide spread glideMode send0..2)\n"
          "esp [sim <0|1>] (link to the ESP32 cutter; sim: the PC stands in on this console) | cutter <0|1> (voice 0 played by the cutter / MIDI)\n"
          "midimap [reload|defaults] (MIDI pages from /midimap.json) | midiin <status> <d1> <d2> (hex, as from USB)");
     fputs("params:", stdout);
@@ -161,6 +164,8 @@ static void shell_line(char* line) {
     else if (!strcmp(c, "reset")) ctrl_reset_write(1);
     else if (!strcmp(c, "usb")) { usbh_status(); mapping_midi_status(); }
     else if (!strcmp(c, "usbdesc")) usbh_descriptors();
+    else if (!strcmp(c, "rev") && argc > 2) { reverb_knob(rk_of(argv[1]), atoi(argv[2])); reverb_status(); }
+    else if (!strcmp(c, "rev")) reverb_status();
     else if (!strcmp(c, "esp") && argc > 2 && !strcmp(argv[1], "sim")) esplink_set_sim(atoi(argv[2]));
     else if (!strcmp(c, "esp")) esplink_status();
     else if (!strcmp(c, "cutter") && argc > 1) mapping_set_cutter(atoi(argv[1]));
@@ -282,6 +287,7 @@ static void io_drain(void) {
 static void console_pump(void) {
     console_drain();
     usbh_poll(); /* MIDI keeps flowing while banks load */
+    reverb_service();
     while (g_cin_r != g_cin_w) {
         const uint8_t c = g_cin[g_cin_r];
         g_cin_r = (g_cin_r + 1) & (sizeof(g_cin) - 1);
@@ -332,6 +338,7 @@ int main(void) {
     printf("smp> ");
 
     mapping_midimap_load();
+    reverb_init();
     usbh_init();
     samples_idle_hook = console_pump;  /* loader slices: dispatch events */
     samples_drain_hook = io_drain;      /* inside SD reads: buffer only */
@@ -348,6 +355,7 @@ int main(void) {
             route_byte(c, 0);
         }
         esplink_poll();
+        reverb_service();
         usbh_poll();
         samples_poll();
         slots_service();

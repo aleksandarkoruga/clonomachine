@@ -71,7 +71,8 @@ struct __attribute__((packed)) smp_event {
     X(NOTEMODE,    noteMode,    0)  /* note -> pos: 0 equal 16ths, 1 transients, 2 snapped */ \
     X(KILL,        kill,        0)  /* strobe: silence all grains                         */ \
     X(ENABLE,      enable,      0)  /* 0/1                                                */ \
-    X(OUT,         out,         0)  /* output: 0 left, 1 right, 2 both (default: slot 0 left, others right) */
+    X(OUT,         out,         0)  /* output: 0 left, 1 right, 2 both (default: slot 0 left, others right) */ \
+    X(FXSEND,      fxSend,      16) /* send into the plate reverb, 0..2 (default 0)       */
 
 #define SMP_PARAM_ENUM(id, name, frac) P_##id,
 enum { SMP_PARAMS(SMP_PARAM_ENUM) P_NUM_PARAMS };

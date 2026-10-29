@@ -131,6 +131,7 @@ void slots_init(void) {
         sl->interval_q16 = 6554;        /* 0.1 s (SC default) */
         sl->amp_q16 = 65536;
         sl->vol_q16 = 65536;
+        sl->fxsend_q16 = 0;
         sl->algo_q16 = 65536;
         g_last_base[s] = NOT_RESIDENT;
     }
@@ -198,6 +199,7 @@ void slot_apply_output(int s) {
     eng_slot_write(s, SMP_R_AMP, (uint32_t)clampi((int32_t)(gain >> 4), 0, 65535));
     eng_slot_write(s, SMP_R_ALGO_AMP, (uint32_t)clampi(sl->algo_q16 >> 1, 0, 32768));
     eng_slot_write(s, SMP_R_OUT, sl->out == 0 ? 1u : sl->out == 1 ? 2u : 3u);
+    eng_slot_write(s, SMP_R_FX_SEND, (uint32_t)clampi(sl->fxsend_q16 >> 4, 0, 8192)); /* u4.12, <= 2 */
 }
 
 void slot_apply_tempo(int s) {

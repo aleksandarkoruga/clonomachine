@@ -17,6 +17,27 @@ static int name_eq(const char* a, const char* b) { /* case-insensitive */
     return *a == *b;
 }
 
+const char* const rk_names[RK_NUM] = {"none",   "size",  "decay",  "damp",      "diffusion", "wander", "return",
+                                       "glide",  "spread", "glideMode", "send0",  "send1",     "send2"};
+
+int rk_of(const char* name) {
+    for (int t = 0; t < RK_NUM; ++t)
+        if (name_eq(name, rk_names[t]))
+            return t;
+    return -1;
+}
+
+static void reverb_defaults(struct mm_reverb* r) {
+    static const uint8_t k[] = {RK_SIZE,  RK_DECAY, RK_DAMP,  RK_DIFFUSION, RK_WANDER, RK_RETURN,
+                                RK_SEND0, RK_SEND1, RK_SEND2, RK_GLIDE,     RK_SPREAD, RK_GLIDEMODE};
+    memset(r, 0, sizeof(*r));
+    r->chan = 7; /* channel 8 */
+    r->cc = 16;
+    r->nknobs = sizeof(k);
+    memcpy(r->knobs, k, sizeof(k));
+    r->mw = RK_GLIDE;
+}
+
 int mm_target_of(const char* name) {
     for (int t = 0; t < MT_NUM; ++t)
         if (name_eq(name, mm_target_names[t]))
@@ -24,11 +45,13 @@ int mm_target_of(const char* name) {
     return -1;
 }
 
-/* the Machinedrum's MIDI machine sends 6 CCs: the first 6 knobs. The volume is on velocity, so
-   the 7th CC (the volume's before) has the stutter repeats */
+/* every control on a CC (the Machinedrum's MIDI machine sends 6 at a time: its CC numbers can
+   be moved along the list). The volume is on velocity, so the 7th CC (the volume's before) has
+   the stutter repeats. 24 = MM_MAX_KNOBS. */
 static const uint8_t g_default_knobs[] = {
     MT_BUFNUM, MT_BANK,     MT_RATE,       MT_PITCH,     MT_GATE,      MT_INTERVAL,  MT_REPEATS,  MT_FXSEND, MT_OVERLAP,
-    MT_RANDPOS, MT_RANDOMPITCH, MT_PROB, MT_SEPARATION, MT_MAXGRAINS, MT_TEMPOLOCK, MT_BGADVANCE, MT_ENVHOLD, MT_PVTRANSIENT};
+    MT_RANDPOS, MT_RANDOMPITCH, MT_PROB, MT_SEPARATION, MT_MAXGRAINS, MT_TEMPOLOCK, MT_BGADVANCE, MT_ENVHOLD, MT_PVTRANSIENT,
+    MT_NOTEMODE, MT_ALGO,   MT_GRAINDUR,   MT_OUT,       MT_VOLUME,    MT_AMP};
 
 static void page_init(struct mm_page* p, int chan1, int voice, int cc, int rate_lo, int rate_hi, int pb) {
     memset(p, 0, sizeof(*p));
@@ -50,6 +73,7 @@ void midimap_defaults(struct midimap* m) {
     memset(m, 0, sizeof(*m));
     m->clock_follow = 1;
     m->cutter_chan = 7; /* the cutter's structure controls (on the ESP) */
+    reverb_defaults(&m->reverb);
     page_init(&m->page[0], 5, 0, 16, 0, 4, MT_CUTTER);    /* Machinedrum MIDI machine on channel 5: drums */
     page_init(&m->page[1], 3, 1, 16, -2, 2, MT_NOTEMODE); /* channel 3: melody */
     page_init(&m->page[2], 6, 2, 25, -2, 2, MT_NOTEMODE); /* channel 6: third voice */
@@ -67,6 +91,61 @@ static int target(struct json* j, uint8_t* out, char* err, int errn) {
         return 0;
     }
     *out = (uint8_t)t;
+    return 1;
+}
+
+static int rk_target(struct json* j, uint8_t* out, char* err, int errn) {
+    char s[24];
+    if (!json_string(j, s, sizeof(s)))
+        return 0;
+    const int t = rk_of(s);
+    if (t < 0) {
+        snprintf(err, (size_t)errn, "unknown reverb control \"%s\"", s);
+        j->err = 1;
+        return 0;
+    }
+    *out = (uint8_t)t;
+    return 1;
+}
+
+static int parse_reverb(struct json* j, struct mm_reverb* r, char* err, int errn) {
+    char key[24];
+    int first = 1, chan = 8, cc = 16;
+    while (json_member(j, &first, key, sizeof(key))) {
+        if (name_eq(key, "channel"))
+            json_int(j, &chan);
+        else if (name_eq(key, "cc"))
+            json_int(j, &cc);
+        else if (name_eq(key, "knobs")) {
+            int f = 1;
+            r->nknobs = 0;
+            while (json_element(j, &f)) {
+                uint8_t t = 0;
+                if (!rk_target(j, &t, err, errn))
+                    return 0;
+                if (r->nknobs < MM_MAX_KNOBS)
+                    r->knobs[r->nknobs++] = t;
+            }
+        } else if (name_eq(key, "mw")) {
+            if (!rk_target(j, &r->mw, err, errn))
+                return 0;
+        } else if (name_eq(key, "at")) {
+            if (!rk_target(j, &r->at, err, errn))
+                return 0;
+        } else if (name_eq(key, "pb")) {
+            if (!rk_target(j, &r->pb, err, errn))
+                return 0;
+        } else
+            json_skip(j);
+    }
+    if (j->err)
+        return 0;
+    if (chan < 0 || chan > 16 || cc < 0 || cc > 127) {
+        snprintf(err, (size_t)errn, "reverb: channel 1..16 (0: none), cc 0..127");
+        return 0;
+    }
+    r->chan = chan ? (uint8_t)(chan - 1) : 0xFF;
+    r->cc = (uint8_t)cc;
     return 1;
 }
 
@@ -140,12 +219,16 @@ int midimap_parse(struct midimap* m, const char* buf, int len, char* err, int er
     memset(&t, 0, sizeof(t));
     t.clock_follow = 1;
     t.cutter_chan = 7;
+    reverb_defaults(&t.reverb);
     err[0] = 0;
     json_init(&j, buf, len);
     while (json_member(&j, &first, key, sizeof(key))) {
         if (name_eq(key, "clockFollow"))
             json_bool(&j, &t.clock_follow);
-        else if (name_eq(key, "cutterChannel")) {
+        else if (name_eq(key, "reverb")) {
+            if (!parse_reverb(&j, &t.reverb, err, errn))
+                break;
+        } else if (name_eq(key, "cutterChannel")) {
             json_int(&j, &t.cutter_chan);
             if (t.cutter_chan < 0 || t.cutter_chan > 16) {
                 snprintf(err, (size_t)errn, "cutterChannel: 1..16 (0: none)");
@@ -200,7 +283,9 @@ int midimap_write(const struct midimap* m, char* buf, int n) {
         "voice: 0 drums, 1 melody, 2 third voice; cc: first CC of the page, the knobs follow on "
         "consecutive CCs; rate: range of the rate knob (63 = 1); velocity / mw / at / pb: a note's velocity, "
         "mod wheel, channel aftertouch, pitch bend (its coarse 7 bits); cutterChannel: MIDI channel "
-        "passed on to the break cutter on the ESP32 (0: none). Controls: ");
+        "passed on to the break cutter on the ESP32 (0: none); reverb: the plate reverb's page, controls "
+        "size decay damp diffusion wander return glide spread glideMode send0 send1 send2 (the voices' sends). "
+        "Controls: ");
     for (int t = 0; t < MT_NUM; ++t)
         OUT("%s%s", mm_target_names[t], t + 1 < MT_NUM ? " " : "");
     OUT(". gate: 1/32 bar .. 16 bars (exponential, 64 ~ 3/4 bar); volume: on top of amp, kept while the cutter "
@@ -209,6 +294,14 @@ int midimap_write(const struct midimap* m, char* buf, int n) {
         "centre hands voice 0 to the cutter (ESP32 or OSC).\",\n");
     OUT("  \"clockFollow\": %s,\n", m->clock_follow ? "true" : "false");
     OUT("  \"cutterChannel\": %d,\n", m->cutter_chan);
+    {
+        const struct mm_reverb* r = &m->reverb;
+        OUT("  \"reverb\": {\"channel\": %d, \"cc\": %d, \"knobs\": [", r->chan == 0xFF ? 0 : r->chan + 1, r->cc);
+        for (int k2 = 0; k2 < r->nknobs; ++k2)
+            OUT("\"%s\"%s", rk_names[r->knobs[k2]], k2 + 1 < r->nknobs ? ", " : "");
+        OUT("],\n             \"mw\": \"%s\", \"at\": \"%s\", \"pb\": \"%s\"},\n", rk_names[r->mw], rk_names[r->at],
+            rk_names[r->pb]);
+    }
     OUT("  \"pages\": [\n");
     for (int i = 0; i < m->npages; ++i) {
         const struct mm_page* p = &m->page[i];

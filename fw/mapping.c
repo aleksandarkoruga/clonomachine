@@ -3,6 +3,7 @@
 #include "mapping.h"
 
 #include "esplink.h"
+#include "reverb.h"
 
 #include <stdio.h>
 
@@ -124,6 +125,7 @@ static void raw_param(int s, int p, int32_t v) {
     case P_KILL: eng_slot_write(s, SMP_R_STROBE, SMP_STROBE_KILL); break;
     case P_ENABLE: sl->enabled = !!v; slot_apply_flags(s); break;
     case P_OUT: sl->out = v < 0 ? 0 : v > 2 ? 2 : v; slot_apply_output(s); break;
+    case P_FXSEND: sl->fxsend_q16 = v; slot_apply_output(s); break;
     default: break;
     }
 }
@@ -300,7 +302,7 @@ static void apply(int pi, int t, int v) {
     case MT_NOTEMODE: raw_param(s, P_NOTEMODE, v * 3 / 128); break;
     case MT_OUT: raw_param(s, P_OUT, v * 3 / 128); break;
     case MT_REPEATS: raw_param(s, P_REPEATS, v > 126 ? 126 : v); break;
-    case MT_FXSEND: break; /* reverb send: not in the gateware yet */
+    case MT_FXSEND: raw_param(s, P_FXSEND, v * 65536 / 127); break; /* 0 .. 1 */
     case MT_VOLUME: g_slots[s].vol_q16 = lut_amp[v]; slot_apply_output(s); break;
     default: break;
     }
@@ -409,6 +411,19 @@ void mapping_midi_at(uint8_t st, uint8_t d1, uint8_t d2, uint32_t t) {
     if (st < 0x80 || st >= 0xF0)
         return;
     const int type = st & 0xF0, chan = st & 0xF;
+    if (g_mm.reverb.chan != 0xFF && chan == g_mm.reverb.chan) { /* the plate reverb's page */
+        const struct mm_reverb* rv = &g_mm.reverb;
+        if (type == 0xB0) {
+            if (d1 == 1 && rv->mw)
+                reverb_knob(rv->mw, d2);
+            else if (d1 >= rv->cc && d1 - rv->cc < rv->nknobs)
+                reverb_knob(rv->knobs[d1 - rv->cc], d2);
+        } else if (type == 0xD0)
+            reverb_knob(rv->at, d1 & 127);
+        else if (type == 0xE0)
+            reverb_knob(rv->pb, d2 & 127); /* the coarse 7 bits */
+        return;
+    }
     if (g_mm.cutter_chan && chan == g_mm.cutter_chan - 1) { /* the cutter's channel: to the ESP */
         esplink_forward_midi(st, d1, d2);
         return;
