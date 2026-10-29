@@ -90,7 +90,7 @@ Planned:
 - **OSC on the board:** the on-board ESP32 receives OSC over WiFi and sends the same events
   to the FPGA over the link the cutter already uses, so no PC is needed.
 - **Wireless controllers over ESP-NOW:** ESP32-based controllers talk to the board's ESP32
-  directly, without a router or another radio on the board.
+  directly, peer to peer: no WiFi router or network needed.
 - **Self-describing parameters:** the board announces its address space (OSCQuery-style:
   every voice parameter with its range, the banks and samples, the MIDI pages, the reverb and
   the cutter), so a controller sets itself up instead of every address being typed by hand.
