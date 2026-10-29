@@ -42,6 +42,7 @@ echo "== MicroPython v1.24.1"
 if [[ ! -d "$MPY/.git" ]]; then
     git clone -b v1.24.1 --depth 1 https://github.com/micropython/micropython.git "$MPY"
 fi
-make -C "$MPY/mpy-cross" -j"$(nproc)"
+# gcc 15 errors on a char-array initialiser MicroPython 1.24 uses: allow it
+make -C "$MPY/mpy-cross" -j"$(nproc)" CFLAGS_EXTRA=-Wno-unterminated-string-initialization
 (source "$IDF/export.sh" >/dev/null && make -C "$MPY/ports/esp32" submodules)
 echo "== done: source host/esp32/env.sh before building"
