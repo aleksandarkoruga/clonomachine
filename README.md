@@ -4,8 +4,8 @@ A time-stretching sampler on the ULX3S-85F FPGA board:
 [BufGrainPlay](https://github.com/aleksandarkoruga/BufGrainPlay) grain engine and a
 [Bungee](https://github.com/bungee-audio-stretch/bungee) phase vocoder in fabric (per slot,
 switchable live), a [PMWave](https://github.com/aleksandarkoruga/pmwave) plate reverb, a break
-cutter on the on-board ESP32, USB-MIDI, VexRiscv/LiteX SoC, SD sample library, OSC control,
-ΔΣ audio out.
+cutter on the on-board ESP32, USB-MIDI, VexRiscv/LiteX SoC, SD sample library, OSC control
+(through a PC bridge for now, see [OSC](#osc)), ΔΣ audio out.
 
 ```bash
 . ./env.sh          # tools/ (yosys, nextpnr, verilator, openFPGALoader, riscv gcc) + .venv (LiteX)
@@ -76,6 +76,25 @@ mod wheel = release, notes = presets, pitch bend above the centre = the conducto
 form. The drum page's sample knob picks the cutter's sample; its velocity (volume) and gate
 stay MIDI's, so the gate knob sets how long each cut sounds.
 Presets: straight, edits, jungle, drill, tape, v13, texture.
+
+## OSC
+
+Today `host/osc_bridge.py` runs on the PC and turns OSC (UDP 57130) into the board's 8-byte
+control events over the USB console: `/slot/<n>/<param>` (the BufGrainPlay argument names plus
+the sampler's own: `bank`, `algo`, `noteMode`, `fxSend`, `trig`, ...), `/midi/note|noteoff|cc|pc|bend`,
+`/bpm`, `/transport/start|stop`. `host/sampler_example.scd` drives it from SuperCollider; any
+OSC sender (TouchOSC, ...) works the same way.
+
+Planned:
+
+- **OSC on the board:** the on-board ESP32 receives OSC over WiFi and sends the same events
+  to the FPGA over the link the cutter already uses, so no PC is needed.
+- **Wireless controllers over ESP-NOW:** ESP32-based controllers talk to the board's ESP32
+  directly, without a router or another radio on the board.
+- **Self-describing parameters:** the board announces its address space (OSCQuery-style:
+  every voice parameter with its range, the banks and samples, the MIDI pages, the reverb and
+  the cutter), so a controller sets itself up instead of every address being typed by hand.
+- Possibly a small REST API for the same (MIDI map, presets, status).
 
 ## Build / run
 
@@ -165,8 +184,8 @@ table.
   edit, warnings for clashes, "Send to board" (the board checks it, saves it, keeps the old one as
   `/midimap.json.bak`, uses it at once), export / import, live MIDI (the rows light up). It holds
   the console like the other tools; `--mock` works without the board. `host/midimap-ui start`
-  (runs it in the background if it isn't running, opens Brave) / `host/midimap-ui stop` (frees the
-  console); the menu shortcuts "Sampler MIDI Map" / "Sampler MIDI Map Stop" call these.
+  (runs it in the background if it isn't running, opens the browser) / `host/midimap-ui stop`
+  (frees the console), handy for desktop shortcuts.
 - Console: `usb`, `usbdesc`, `midimon 1` (decoded) / `2` (raw, timestamped) / `3` (raw incl.
   clock), `midimap [reload]`, `midiin <st> <d1> <d2>` (hex).
 
@@ -201,3 +220,12 @@ SPI flash ISSI IS25LP128 (bitstream @0, firmware boot image @4 MB).
 On-board ESP32 (ESP32-D0WD-V3, PSRAM, 16 MB flash) on its own UART: K3 FPGA TX -> ESP RX, K4 ESP
 TX -> FPGA RX, 3 Mbaud. The board has the v3.1.6+ ESP pinout (EN J5, GPIO0 F1, GPIO22 L2; the
 LiteX platform has the v3.0.x pins), see `host/esp32/README` for the pass-through / esptool.
+
+## License
+
+MIT (`LICENSE`), except:
+
+- the phase-vocoder files derived from [Bungee](https://github.com/bungee-audio-stretch/bungee)
+  (`model/pv_float.*`, `model/pv_model.*`, `model/pv_render.cpp`, `rtl/pv_unit.v`): Mozilla
+  Public License 2.0, as stated in each file;
+- FatFs in `fw/fatfs/`: its own BSD-style license (ChaN), in the files.

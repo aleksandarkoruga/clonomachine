@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MPL-2.0
+// Derived from Bungee (https://github.com/bungee-audio-stretch/bungee), Copyright (C) 2020-2026
+// Parabola Research Limited, and therefore under the Mozilla Public License 2.0
+// (https://mozilla.org/MPL/2.0/); the rest of this repository is MIT (LICENSE).
+//
 // Offline phase-vocoder renderer: runs the float reference (and the fixed-point model)
 // over a WAV file at a constant speed/pitch, like Bungee's command-line tool, and
 // optionally compares the result with another WAV (best lag, SNR).

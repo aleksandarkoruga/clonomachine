@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MPL-2.0
+// Derived from Bungee (https://github.com/bungee-audio-stretch/bungee), Copyright (C) 2020-2026
+// Parabola Research Limited, and therefore under the Mozilla Public License 2.0
+// (https://mozilla.org/MPL/2.0/); the rest of this repository is MIT (LICENSE).
+//
 #include "pv_model.h"
 
 #include <algorithm>
