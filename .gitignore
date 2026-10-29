@@ -21,3 +21,7 @@ __pycache__/
 
 # local notes, not part of the repo
 /ULX3S_Sampler_Handoff.md
+/docs/ULX3S_Sampler_Handoff_2026-10-02_original.md
+# local Claude Code settings and notes
+/.claude/
+/CLAUDE.local.md

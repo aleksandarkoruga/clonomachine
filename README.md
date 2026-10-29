@@ -1,8 +1,11 @@
-# ULX3S-85F time-stretching sampler
+# Clonomachine
 
-BufGrainPlay grain engine and a Bungee
-phase vocoder in fabric (per slot, switchable live), VexRiscv/LiteX SoC, SD sample
-library, OSC control, ΔΣ audio out.
+A time-stretching sampler on the ULX3S-85F FPGA board:
+[BufGrainPlay](https://github.com/aleksandarkoruga/BufGrainPlay) grain engine and a
+[Bungee](https://github.com/bungee-audio-stretch/bungee) phase vocoder in fabric (per slot,
+switchable live), a [PMWave](https://github.com/aleksandarkoruga/pmwave) plate reverb, a break
+cutter on the on-board ESP32, USB-MIDI, VexRiscv/LiteX SoC, SD sample library, OSC control,
+ΔΣ audio out.
 
 ```bash
 . ./env.sh          # tools/ (yosys, nextpnr, verilator, openFPGALoader, riscv gcc) + .venv (LiteX)
@@ -29,7 +32,8 @@ revisions in use are pinned in `deps.lock`.
 
 ## Plate reverb
 
-The PMWave UGen (github.com/aleksandarkoruga/pmwave) as a 2x2 plate (16 waveguide rails up to 40 ms) in the gateware
+The [PMWave](https://github.com/aleksandarkoruga/pmwave) UGen as a 2x2 plate (16 waveguide rails
+up to 40 ms) in the gateware
 (`rtl/reverb_unit.v`, bit-exact with `model/reverb_model.cpp`; `model/pmwave_ref.cpp` is the float
 original): every voice has a send (`fxSend`), the plate comes back on the right output only, so the
 drums stay alone on the left. The soft core runs its control every 256 samples
