@@ -74,3 +74,21 @@ with open(os.path.join(out, "pv_win.hex"), "w") as f:
         f.write("%05x\n" % q)
     for u in range(PV_FADE):
         f.write("%05x\n" % int(round(65536 * (1 - fin(u)))))
+
+# ---------------- plate reverb taps (model/reverb_model.cpp tap_table, rtl/reverb_unit.v) ----------------
+# rv_t0.hex / rv_t1.hex : 1024 x 18 bit two's complement, Q15 4-point Lagrange taps t0 / t1 at the
+# fraction k/1024 (t2, t3 = t1, t0 at 1024-k). Python's >> floors like the model's.
+def rv_tap(which, k):
+    f = k << 5
+    fm1, fm2 = f - 32768, f - 65536
+    if which == 0:
+        a = (f * fm1) >> 15
+        return (((a * fm2) >> 15) * -21845) >> 17
+    c = ((f + 32768) * fm2) >> 15
+    return ((c * fm1) >> 15) >> 1
+for which in (0, 1):
+    with open(os.path.join(out, "rv_t%d.hex" % which), "w") as f:
+        for k in range(1024):
+            v = rv_tap(which, k)
+            assert -(1 << 17) <= v < (1 << 17), v
+            f.write("%05x\n" % (v & 0x3FFFF))

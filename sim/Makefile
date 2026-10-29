@@ -28,3 +28,15 @@ pv: obj_pv/Vpv_unit
 pvrun: pv
 	./obj_pv/Vpv_unit
 .PHONY: pv pvrun
+
+# plate reverb unit vs model, sample by sample:  make reverb && ./obj_rv/Vreverb_unit [seconds]
+RV_RTL = ../rtl/reverb_unit.v
+obj_rv/Vreverb_unit: $(RV_RTL) tb_reverb.cpp ../model/reverb_model.cpp ../model/reverb_model.h ../fw/reverb_ctl.c ../fw/reverb_ctl.h
+	$(VERILATOR) --cc --exe --build -O3 -j 8 --x-assign 0 --x-initial 0 --Mdir obj_rv \
+	  -Wno-fatal -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-UNUSEDPARAM \
+	  -GT0_HEX='"../rtl/rv_t0.hex"' -GT1_HEX='"../rtl/rv_t1.hex"' \
+	  -CFLAGS "-std=c++20 -O2 -I../fw" $(RV_RTL) tb_reverb.cpp ../model/reverb_model.cpp ../fw/reverb_ctl.c
+reverb: obj_rv/Vreverb_unit
+reverbrun: reverb
+	./obj_rv/Vreverb_unit
+.PHONY: reverb reverbrun

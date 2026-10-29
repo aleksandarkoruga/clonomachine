@@ -1,8 +1,9 @@
 // Bit-exact model of rtl/reverb_unit.v: the 2x2 PMWave plate in fixed point.
 //
 // 16 rails (4 junctions x {W->J, N->J, J->W, J->N}), each a 2048-sample ring of s18 (Q2.16). Per
-// sample, for every rail: length D (Q11.20) -> delay d and fraction f (Q15) -> 4-point Lagrange
-// taps (Q15) -> x = taps . ring[w-d .. w-d-3] -> loop filter y = gain x + pole y[n-1] (Q1.17
+// sample, for every rail: length D (Q11.20) -> delay d and fraction k (10 bits) -> 4-point
+// Lagrange taps (Q15) from two tables, t0 t1 at k and, by the taps' symmetry (t2(f) = t1(1-f),
+// t3(f) = t0(1-f)), t2 t3 at 1024-k -> x = taps . ring[w-d .. w-d-3] -> loop filter y = gain x + pole y[n-1] (Q1.17
 // coefficients). Junction pressures p = (sum of the 4 arriving waves) / 2, the input joins at
 // junction 0 with 0.4, the outgoing waves p - arriving go into the rings at slot w-1. Output:
 // (p[3] + p[1]) / 2 (the UGen's two pickups, mixed: the plate feeds the right output only).
@@ -36,4 +37,5 @@ struct ReverbModel {
     }
     int32_t step(int32_t in); // in, out: s24 Q2.22
     static void taps(uint32_t D, int32_t t[4]); // the interpolation taps for a length
+    static int32_t tap_table(int which, int k);  // T0 / T1 at k (0..1023), Q15: the ROMs' contents
 };

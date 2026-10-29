@@ -9,15 +9,30 @@ inline int64_t rnd(int64_t v, int n) { return (v + ((int64_t)1 << (n - 1))) >> n
 }  // namespace
 
 // 4-point Lagrange through delays d-1 .. d+2 (PMWave's _updateLengths), f in Q15:
-//   a = f(f-1), c = (f+1)(f-2), t0 = -a(f-2)/6, t1 = c(f-1)/2, t2 = -cf/2, t3 = a(f+1)/6
+//   a = f(f-1), c = (f+1)(f-2), t0 = -a(f-2)/6, t1 = c(f-1)/2   (t2 t3: the mirror images)
+int32_t ReverbModel::tap_table(int which, int k) {
+    const int64_t f = (int64_t)k << 5, fm1 = f - 32768, fm2 = f - 65536;
+    if (which == 0) {
+        const int64_t a = (f * fm1) >> 15;
+        return (int32_t)((((a * fm2) >> 15) * -21845) >> 17);
+    }
+    const int64_t c = ((f + 32768) * fm2) >> 15;
+    return (int32_t)(((c * fm1) >> 15) >> 1);
+}
+
 void ReverbModel::taps(uint32_t D, int32_t t[4]) {
-    const int64_t f = (D >> 5) & 0x7FFF, fm1 = f - 32768, fp1 = f + 32768, fm2 = f - 65536;
-    const int64_t a = (f * fm1) >> 15;  // -8192 .. 0
-    const int64_t c = (fp1 * fm2) >> 15; // -73728 .. -65536
-    t[0] = (int32_t)((((a * fm2) >> 15) * -21845) >> 17);
-    t[1] = (int32_t)(((c * fm1) >> 15) >> 1);
-    t[2] = (int32_t)(-((c * f) >> 15) >> 1);
-    t[3] = (int32_t)((((a * fp1) >> 15) * 21845) >> 17);
+    static int32_t T[2][1024];
+    static bool built = false;
+    if (!built) {
+        for (int k = 0; k < 1024; ++k)
+            T[0][k] = tap_table(0, k), T[1][k] = tap_table(1, k);
+        built = true;
+    }
+    const int k = (int)((D >> 10) & 1023);
+    t[0] = T[0][k];
+    t[1] = T[1][k];
+    t[2] = k ? T[1][1024 - k] : 0;
+    t[3] = k ? T[0][1024 - k] : 0;
 }
 
 int32_t ReverbModel::step(int32_t in) {
