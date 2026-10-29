@@ -15,6 +15,9 @@ void mapping_midi_status(void);
 void mapping_midimap_load(void);     /* /midimap.json; written with the defaults if missing */
 void mapping_midimap_print(void);
 void mapping_midimap_defaults(void); /* /midimap.json -> .bak, the defaults written + used */
+void mapping_midimap_json(void);     /* the active map between marker lines (host/midimap_web.py) */
+void mapping_midimap_names(void);    /* the control names, same */
+void mapping_midimap_put(const char* arg, const char* arg2); /* console "mmput" */
 extern int g_clock_follow;           /* 1: MIDI clock sets the global bpm                 */
 extern int g_md_slot0_external;      /* pitch bend 'cutter' below the centre: voice 0 is
                                         played by the cutter (ESP32 or OSC), MIDI notes ignored */

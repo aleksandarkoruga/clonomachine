@@ -164,12 +164,15 @@ static void shell_line(char* line) {
     else if (!strcmp(c, "reset")) ctrl_reset_write(1);
     else if (!strcmp(c, "usb")) { usbh_status(); mapping_midi_status(); }
     else if (!strcmp(c, "usbdesc")) usbh_descriptors();
+    else if (!strcmp(c, "mmput") && argc > 1) mapping_midimap_put(argv[1], argc > 2 ? argv[2] : NULL);
     else if (!strcmp(c, "rev") && argc > 2) { reverb_knob(rk_of(argv[1]), atoi(argv[2])); reverb_status(); }
     else if (!strcmp(c, "rev")) reverb_status();
     else if (!strcmp(c, "esp") && argc > 2 && !strcmp(argv[1], "sim")) esplink_set_sim(atoi(argv[2]));
     else if (!strcmp(c, "esp")) esplink_status();
     else if (!strcmp(c, "cutter") && argc > 1) mapping_set_cutter(atoi(argv[1]));
     else if (!strcmp(c, "midimap")) {
+        if (argc > 1 && !strcmp(argv[1], "json")) { mapping_midimap_json(); return; }
+        if (argc > 1 && !strcmp(argv[1], "names")) { mapping_midimap_names(); return; }
         if (argc > 1 && !strcmp(argv[1], "defaults")) mapping_midimap_defaults();
         else if (argc > 1) mapping_midimap_load();
         mapping_midimap_print();
@@ -220,7 +223,7 @@ static void shell_line(char* line) {
  * route_byte() dispatches complete frames immediately, also from inside the SD loader
  * (samples_idle_hook), so a busy Monomachine never backs up while banks load. Shell
  * text is only executed from the main loop (it may rescan the card). */
-static char g_line[96];
+static char g_line[192]; /* "mmput <160 hex digits>" from host/midimap_web.py */
 static unsigned g_line_len;
 
 static void text_byte(uint8_t c) {

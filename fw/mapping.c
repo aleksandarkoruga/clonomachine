@@ -6,6 +6,8 @@
 #include "reverb.h"
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "engine.h"
 #include "samples.h"
@@ -223,8 +225,10 @@ static void pages_prepare(void) {
     g_clock_follow = g_mm.clock_follow;
 }
 
+#define MM_TEXT 8192 /* the JSON file at most */
+
 void mapping_midimap_load(void) {
-    static char buf[4096];
+    static char buf[MM_TEXT];
     char err[96];
     const int n = samples_read_file("/midimap.json", buf, sizeof(buf));
     if (n < 0) {
@@ -242,7 +246,7 @@ void mapping_midimap_load(void) {
 
 /* console "midimap defaults": the current file goes to /midimap.json.bak, the defaults replace it */
 void mapping_midimap_defaults(void) {
-    static char buf[4096];
+    static char buf[MM_TEXT];
     const int n = samples_read_file("/midimap.json", buf, sizeof(buf));
     if (n > 0 && samples_write_file("/midimap.json.bak", buf, n) != 0) {
         printf("MIDI: could not save /midimap.json.bak, nothing changed\n");
@@ -257,9 +261,82 @@ void mapping_midimap_defaults(void) {
 }
 
 void mapping_midimap_print(void) {
-    static char buf[4096];
+    static char buf[MM_TEXT];
     midimap_write(&g_mm, buf, sizeof(buf));
     fputs(buf, stdout);
+}
+
+/* ---- the MIDI map from / to the PC (host/midimap_web.py) over the console --------------------
+ * "midimap json" / "midimap names": the active map / the control names between marker lines.
+ * "mmput begin", "mmput <hex>" (each answered "MMPUT <bytes so far>": upper case, unlike the
+ * echo), "mmput end <fnv1a32>":
+ * a new /midimap.json; saved (the old one as .bak) and used only if it arrived whole and parses. */
+void mapping_midimap_json(void) {
+    printf("<<<MIDIMAP\n");
+    mapping_midimap_print();
+    printf(">>>MIDIMAP\n");
+}
+
+void mapping_midimap_names(void) {
+    printf("<<<NAMES\n{\"controls\": [");
+    for (int t = 0; t < MT_NUM; ++t)
+        printf("%s\"%s\"", t ? ", " : "", mm_target_names[t]);
+    printf("],\n \"reverb\": [");
+    for (int t = 0; t < RK_NUM; ++t)
+        printf("%s\"%s\"", t ? ", " : "", rk_names[t]);
+    printf("]}\n>>>NAMES\n");
+}
+
+static char g_put[MM_TEXT];
+static int g_put_len, g_put_bad;
+
+static int hexval(char c) {
+    return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+
+void mapping_midimap_put(const char* arg, const char* arg2) {
+    if (!strcmp(arg, "begin")) {
+        g_put_len = 0;
+        g_put_bad = 0;
+        printf("MMPUT 0\n");
+        return;
+    }
+    if (strcmp(arg, "end")) { /* a chunk */
+        for (; arg[0] && arg[1]; arg += 2) {
+            const int hi = hexval(arg[0]), lo = hexval(arg[1]);
+            if (hi < 0 || lo < 0 || g_put_len >= (int)sizeof(g_put)) {
+                g_put_bad = 1;
+                break;
+            }
+            g_put[g_put_len++] = (char)(hi << 4 | lo);
+        }
+        printf("MMPUT %d\n", g_put_len);
+        return;
+    }
+    uint32_t h = 2166136261u; /* FNV-1a */
+    for (int i = 0; i < g_put_len; ++i)
+        h = (h ^ (uint8_t)g_put[i]) * 16777619u;
+    if (g_put_bad || !arg2 || strtoul(arg2, NULL, 16) != h) {
+        printf("MMPUT ERROR the transfer was damaged, nothing changed\n");
+        return;
+    }
+    static struct midimap t;
+    char err[96];
+    if (midimap_parse(&t, g_put, g_put_len, err, sizeof(err)) != 0) {
+        printf("MMPUT ERROR %s, nothing changed\n", err);
+        return;
+    }
+    static char old[MM_TEXT];
+    const int n = samples_read_file("/midimap.json", old, sizeof(old));
+    if (n > 0)
+        samples_write_file("/midimap.json.bak", old, n);
+    if (samples_write_file("/midimap.json", g_put, g_put_len) != 0) {
+        printf("MMPUT ERROR could not write /midimap.json, nothing changed\n");
+        return;
+    }
+    g_mm = t;
+    pages_prepare();
+    printf("MMPUT OK %d pages (the old file is /midimap.json.bak)\n", g_mm.npages);
 }
 
 static void md_set_external(int on);
