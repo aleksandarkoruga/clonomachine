@@ -27,12 +27,23 @@ revisions in use are pinned in `deps.lock`.
 | `fw/` | firmware: SD index + SDRAM cache, tempo/slot logic, USB-MIDI host + MIDI pages (`/midimap.json`), Monomachine map, shell |
 | `host/` | loader, console, flash script, OSC bridge, SuperCollider example |
 
-## Break cutter (ESP32, PC stand-in)
+## Break cutter (on-board ESP32)
 
 `esp/cutter/` is the procedural break cutter (portable C): metric weight x tension -> how far a
 hit moves from the loop -> a move from a palette (reorder, repeat, mangle, texture, silence),
-phrase memory, release, an optional conductor. It will run on the on-board ESP32; until then the
-PC stands in over the console with the same protocol (`esp sim 1`, Machinedrum-synced ticks):
+phrase memory, release, an optional conductor. It runs on the on-board ESP32 inside our own
+MicroPython (`esp/mpy`: C module `cutter` + the 3 Mbaud link on the ESP's UART0 pins, moved to
+UART1 when it starts; `esp/boards/ULX3S_CUTTER`; app `esp/py`, settings `/cutter.json` on the ESP):
+
+```bash
+host/esp32/setup_toolchain.sh                   # once: ESP-IDF 5.2.2 + MicroPython 1.24.1 in tools/esp
+host/esp32/build.sh                             # -> build/esp32
+host/esp32/flash_esp.sh                         # pass-through, esptool, sampler bitstream back
+```
+
+The ESP starts the cutter one second after boot (Ctrl-C on its REPL before that, through the
+pass-through at 115200, keeps the REPL). `esp` on the board's console shows the link. The PC
+can still stand in for it over the console with the same protocol (`esp sim 1`):
 
 ```bash
 python host/cutter_live.py --preset 2           # p N, k energy 0.7, c 1, own 1, s, q

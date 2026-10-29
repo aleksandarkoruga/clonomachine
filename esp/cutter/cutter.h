@@ -108,6 +108,7 @@ void cut_rx(struct cutter* c, const struct smp_event* e);
 /* the clock moves to t; returns 1 with a frame whose time has come (copied to out), 0 when
    none is due. Call until it returns 0. */
 int cut_pop(struct cutter* c, double t, struct cut_frame* out);
+double cut_next_due(const struct cutter* c); /* the earliest waiting frame's time, -1 if none */
 const char* cut_move_name(int m);
 enum { CUT_NMOVES = 15 };
 

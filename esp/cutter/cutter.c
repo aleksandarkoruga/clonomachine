@@ -553,6 +553,14 @@ void cut_rx(struct cutter* c, const struct smp_event* e) {
 
 void cut_clock(struct cutter* c, double t) { c->now = t; }
 
+double cut_next_due(const struct cutter* c) {
+    double t = -1;
+    for (int i = 0; i < c->nq; ++i)
+        if (t < 0 || c->q[i].due < t)
+            t = c->q[i].due;
+    return t;
+}
+
 int cut_pop(struct cutter* c, double t, struct cut_frame* out) {
     c->now = t;
     int best = -1;
