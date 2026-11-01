@@ -40,7 +40,7 @@ main { padding: 16px; max-width: 1500px; margin: 0 auto; }
   padding: 8px 12px; margin-bottom: 14px; }
 #warnings li { margin: 2px 0; }
 .globals { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; margin-bottom: 14px; color: var(--muted); }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 14px; align-items: start; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(360px, 100%), 1fr)); gap: 14px; align-items: start; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .card h2 { margin: 0; padding: 10px 12px; font-size: 15px; display: flex; gap: 8px; align-items: baseline;
   border-bottom: 1px solid var(--line); transition: background .4s; }
@@ -67,6 +67,17 @@ tr.group td { background: var(--chip); color: var(--muted); font-size: 11px; pad
 .add { padding: 8px 12px; }
 .note { padding: 8px 12px; color: var(--muted); font-size: 13px; }
 .mono { font-family: ui-monospace, monospace; }
+td.ctl { padding-top: 4px; }
+.info { font-size: 11.5px; line-height: 1.3; color: var(--muted); padding: 2px 2px 4px; }
+.info .rng { display: block; font: 11px ui-monospace, monospace; color: var(--ink); }
+.fields label[title] { cursor: help; text-decoration: underline dotted var(--line); }
+.card.ref { grid-column: 1 / -1; }
+.card.ref summary { padding: 10px 12px; font-weight: 600; font-size: 15px; cursor: pointer; }
+.card.ref summary .sub { color: var(--muted); font-weight: normal; font-size: 13px; margin-left: 6px; }
+.ref td { vertical-align: top; padding: 4px 8px; }
+.ref td.name { font-family: ui-monospace, monospace; white-space: nowrap; width: 1%; }
+.ref td.rng { font: 12px ui-monospace, monospace; width: 30%; }
+.ref tr.sec td { background: var(--chip); color: var(--muted); font-size: 12px; font-weight: 600; padding: 3px 8px; }
 @media (max-width: 420px) { .fields { grid-template-columns: auto 1fr; } }
 </style>
 </head>
@@ -95,8 +106,87 @@ tr.group td { background: var(--chip); color: var(--muted); font-size: 11px; pad
 <script>
 "use strict";
 const VOICES = ["Drums", "Melody", "Third voice"];
-const CUTTER_CCS = ["energy", "density", "syncopation", "anchor", "build", "character", "release", "memory", "surprise", "phrase bars", "phrases / section"];
-let model = null, names = { controls: [], reverb: [] }, loaded = "", es = null;
+/* What every parameter does with its MIDI value, as the firmware converts it (fw/mapping.c,
+   fw/reverb.c, esp/cutter/cutter.c): [range, description]. Controls take 0..127 from a knob,
+   the velocity, mod wheel, aftertouch or pitch bend (its 7 coarse bits). */
+const SWITCH = "off < 64 ≤ on";
+const CONTROL_INFO = {
+  none: ["–", "Not used."],
+  bufNum: ["0 .. 127, wraps at the bank's size", "Sample inside the voice's bank, instant (the bank is in SDRAM). On the drums also the cutter's sample."],
+  bank: ["0 .. 127, wraps at the bank count", "Bank of the voice's folder; loads in the background while the old one plays."],
+  rate: [p => p ? `${p.rate[0]} .. 1 at 63 .. ${p.rate[1]}, linear` : "rate[0] .. 1 at 63 .. rate[1], linear (the page's rate)",
+         "Playhead speed at the global tempo: 1 in time, 0.5 half speed, negative backwards."],
+  pitch: ["0.1 .. 1 at 63 .. 4, linear", "Pitch as a speed ratio (0.5 an octave down, 2 up), apart from the playhead speed."],
+  gate: ["1/32 .. 16 bars, exponential (64 ≈ 3/4 bar)", "How long a note plays, in bars of the global tempo; a note-off can end it earlier."],
+  interval: ["≈ 0 .. 250 ms, curved (64 ≈ 20 ms)", "Time between the stutter's retriggers (see repeats)."],
+  amp: ["0 .. 1 at 63 .. 2, linear", "Voice gain. Not on a knob by default: unity, the cutter uses it for accents."],
+  overlap: ["0.25 .. 16, exponential (64 ≈ 2)", "Grains: how many overlap, i.e. new grains per grain length."],
+  randPos: ["0 .. 1 of the sample, quadratic (64 ≈ 0.25)", "Grains: random offset of each grain's read position."],
+  randomPitch: ["±2 octaves at 0 and 127, none at 63", "Grains: random pitch per grain, up to that many octaves either way."],
+  prob: ["0 .. 1, linear", "Grains: chance that a grain onset plays."],
+  separation: ["0 .. 1 = 0 .. ±90 %, linear", "Grains: jitter of the time to the next grain."],
+  maxGrains: ["1 .. 32, linear", "Grains: most grains at once for this voice."],
+  tempoLock: [SWITCH, "On: the loop is stretched to the global tempo. Off: its own speed (melodies, one-shots)."],
+  bgAdvance: [SWITCH, "On: a background playhead runs with the clock; notes start from it plus their offset."],
+  envHold: [SWITCH, "On: the gate stays open until the note-off."],
+  pvTransient: [SWITCH, "Phase vocoder: keep transients sharp (Bungee's transient handling). On by default."],
+  algo: ["grains < 64 ≤ phase vocoder", "Time stretcher: BufGrainPlay grains or the Bungee phase vocoder, 5 ms crossfade."],
+  grainDur: ["5 ms .. 0.5 s, exponential (64 ≈ 50 ms)", "Grains: grain length."],
+  noteMode: ["0-42 grid · 43-85 transients · 86-127 snapped", "Note 12 + k starts at the k-th 16th, the k-th transient, or the k-th 16th moved to its nearest transient."],
+  out: ["0-42 left · 43-85 right · 86-127 both", "Output channel of the voice."],
+  cutter: ["cutter < 64 ≤ MIDI", "Drums only: below 64 the ESP32 break cutter plays the voice, from 64 MIDI does."],
+  repeats: ["0 .. 126 retriggers (127 = 126)", "Stutter: retriggers after each note, one per interval."],
+  fxSend: ["0 .. 1, linear", "Send into the plate reverb (it comes back on the right output)."],
+  volume: ["0 .. 1 at 63 .. 2, linear", "Volume on top of amp; the default velocity target (63 = unity), also while the cutter plays."],
+};
+const REVERB_INFO = {
+  none: ["–", "Not used."],
+  size: ["rails 0.1 .. 40 ms", "Plate size: the length of its 16 waveguide rails."],
+  decay: ["0.1 .. 30 s, exponential (64 ≈ 1.8 s)", "Decay time (T60) of the lows."],
+  damp: ["0 none .. 127: highs decay 1024× faster", "High damping: the treble's decay is decay × 2^(−10 · v/127)."],
+  diffusion: ["0 .. 1, linear", "Spread of the rail lengths around the size: denser, less metallic."],
+  wander: ["0 .. 0.1, quadratic (64 ≈ 0.025)", "Slow random movement of the rail lengths."],
+  return: ["0 .. 1.5, linear (85 ≈ 1)", "Reverb level on the right output."],
+  glide: ["1 ms .. 10 s, exponential (64 ≈ 0.1 s)", "How long the rails take to reach new lengths (size, diffusion)."],
+  spread: ["0 .. 2, linear", "Each rail glides at its own speed: spread of the glide times."],
+  glideMode: ["lag < 64 ≤ constant rate", "Glide shape: exponential lag or constant speed."],
+  send0: ["0 .. 1, linear", "Reverb send of voice 0 (drums), the same as its fxSend."],
+  send1: ["0 .. 1, linear", "Reverb send of voice 1 (melody), the same as its fxSend."],
+  send2: ["0 .. 1, linear", "Reverb send of voice 2 (third voice), the same as its fxSend."],
+};
+const CUTTER = [ /* the cutter channel's CC 16.., each 0..127 */
+  ["energy", "0 .. 1", "How far the cuts move away from the loop."],
+  ["density", "0 .. 1 = 0 .. 16 hits per bar (±40 % per phrase)", "How many 16ths of a bar get a hit."],
+  ["syncopation", "0 .. 1", "0: hits on the strong positions .. 1: on the weak ones."],
+  ["anchor", "0 .. 1", "How much a strong position protects the loop from cuts."],
+  ["build", "0 .. 1, 0.5 = linear", "Tension over the phrase: 0 rises early, 1 surges late."],
+  ["character", "0 edits · 0.33 rolls · 0.66 tape · 1 texture", "Which family of moves the cuts favour."],
+  ["release", "0 .. half the phrase", "Phrase ending where the loop runs, fills or drops out (also the mod wheel)."],
+  ["memory", "0 .. 1", "0: new dice every phrase .. 1: the same phrase again."],
+  ["surprise", "0 .. 1", "Wider choice of moves, more abrupt conductor changes."],
+  ["phrase bars", "1 .. 16 bars", "Phrase length, from the next phrase."],
+  ["phrases / section", "1 .. 8", "Phrases per section of the conductor's form."],
+];
+const CUTTER_MORE = [
+  ["mod wheel", "0 .. 127", "Release, like its CC."],
+  ["notes", "note number mod 7", "Presets: straight, edits, jungle, drill, tape, v13, texture."],
+  ["pitch bend", "≥ 69 of 127: auto", "Above the centre the conductor plays the form, below it you do."],
+];
+const FIELD_INFO = {
+  channel: ["1 .. 16", "MIDI channel of the page."],
+  voice: ["Drums (/drums) · Melody · Third voice (/melody)", "Voice the page plays."],
+  cc: ["0 .. 127", "CC of the first knob; the next knobs follow on consecutive CCs (rows of 6 = one Machinedrum MIDI machine)."],
+  rate: ["-8 .. 8 each", "Ends of the rate control: 0 gives the first, 63 gives 1, 127 the second."],
+  velocity: ["1 .. 127", "Note velocity drives this control."],
+  noteOff: ["on / off", "On: a note-off ends the gate. Off: notes play their whole gate."],
+  mw: ["CC 1, 0 .. 127", "Mod wheel drives this control."],
+  at: ["0 .. 127", "Channel aftertouch drives this control."],
+  pb: ["0 .. 127, centre 64", "Pitch bend's 7 coarse bits drive this control (the Machinedrum sends only those)."],
+  clockFollow: ["on / off", "The global tempo follows incoming MIDI clock."],
+  cutterChannel: ["none, 1 .. 16", "Channel passed on to the ESP32 break cutter."],
+  reverbChannel: ["none, 1 .. 16", "Channel of the plate reverb's page."],
+};
+let model = null, names = { controls: [], reverb: [] }, loaded = "", es = null, refOpen = true;
 const $ = id => document.getElementById(id);
 
 function status(text, cls) { const s = $("status"); s.textContent = text; s.className = "status " + (cls || ""); }
@@ -135,14 +225,34 @@ function btn(text, title, fn) {
   b.className = "small"; b.textContent = text; b.title = title; b.onclick = () => { fn(); touch(); };
   return b;
 }
-function field(grid, label, el, key) {
+function field(grid, label, el, key, help) {
   const l = document.createElement("label"); l.textContent = label;
+  if (help) l.title = `${help[0]}: ${help[1]}`;
   const w = document.createElement("div"); w.className = "f"; if (key) w.dataset.key = key; w.append(el);
   grid.append(l, w);
 }
+/* [range, description] of a parameter; page: for the ranges that depend on it */
+function info(dict, name, page) {
+  const e = dict[name] || ["?", "Not known to this editor."];
+  return [typeof e[0] === "function" ? e[0](page) : e[0], e[1]];
+}
+function infoLine(e) {
+  const d = document.createElement("div"); d.className = "info";
+  const r = document.createElement("span"); r.className = "rng"; r.textContent = e[0];
+  d.append(r, e[1]);
+  return d;
+}
+/* a select of controls with the chosen one's range and description as its tooltip */
+function controlSelect(list, dict, page, val, onchange) {
+  const s = select(list, val, onchange), e = info(dict, val, page);
+  s.title = `${e[0]}: ${e[1]}`;
+  for (const o of s.options) { const oe = info(dict, o.value, page); o.title = `${oe[0]}: ${oe[1]}`; }
+  return s;
+}
 
-/* a CC -> control table: rows in groups of 6 (the Machinedrum's MIDI machine sends 6 at a time) */
-function knobTable(card, obj, list, chanKey) {
+/* a CC -> control table: rows in groups of 6 (the Machinedrum's MIDI machine sends 6 at a time),
+   each with its range and what it does */
+function knobTable(card, obj, list, dict) {
   const t = document.createElement("table");
   obj.knobs.forEach((k, i) => {
     if (i % 6 === 0) {
@@ -151,7 +261,8 @@ function knobTable(card, obj, list, chanKey) {
     }
     const r = t.insertRow(); r.className = "row"; r.dataset.cc = obj.cc + i;
     const cc = r.insertCell(); cc.className = "cc" + (obj.cc + i > 127 ? " bad" : ""); cc.textContent = obj.cc + i;
-    r.insertCell().append(select(list, k, v => obj.knobs[i] = v));
+    const ctl = r.insertCell(); ctl.className = "ctl";
+    ctl.append(controlSelect(list, dict, obj, k, v => obj.knobs[i] = v), infoLine(info(dict, k, obj)));
     const val = r.insertCell(); val.className = "val"; val.innerHTML = '<div class="bar"><i></i></div>';
     const b = r.insertCell(); b.className = "btns";
     b.append(btn("▲", "move up", () => { if (i) [obj.knobs[i - 1], obj.knobs[i]] = [obj.knobs[i], obj.knobs[i - 1]]; }),
@@ -182,24 +293,25 @@ function render() {
     const c = card(VOICES[p.voice] || ("Voice " + p.voice), `channel ${p.channel}`, p.channel);
     c.dataset.kind = "page"; c.dataset.index = pi;
     const g = document.createElement("div"); g.className = "fields";
+    const F = FIELD_INFO, C = names.controls, I = CONTROL_INFO;
     const ch = document.createElement("select"); chanOptions(ch, p.channel); ch.onchange = () => { p.channel = +ch.value; touch(); };
-    field(g, "channel", ch);
+    field(g, "channel", ch, null, F.channel);
     const vs = document.createElement("select"); VOICES.forEach((v, i) => vs.add(new Option(v, i))); vs.value = p.voice;
     vs.onchange = () => { p.voice = +vs.value; touch(); };
-    field(g, "voice", vs);
-    field(g, "first CC", num(p.cc, 0, 127, 1, v => p.cc = v));
+    field(g, "voice", vs, null, F.voice);
+    field(g, "first CC", num(p.cc, 0, 127, 1, v => p.cc = v), null, F.cc);
     const rate = document.createElement("span");
     rate.append(num(p.rate[0], -8, 8, 0.25, v => p.rate[0] = v), " ", num(p.rate[1], -8, 8, 0.25, v => p.rate[1] = v));
-    field(g, "rate", rate);
-    field(g, "velocity", select(names.controls, p.velocity || "volume", v => p.velocity = v), "vel");
+    field(g, "rate", rate, null, F.rate);
+    field(g, "velocity", controlSelect(C, I, p, p.velocity || "volume", v => p.velocity = v), "vel", F.velocity);
     const no = document.createElement("input"); no.type = "checkbox"; no.checked = p.noteOff !== false;
     no.onchange = () => { p.noteOff = no.checked; touch(); };
-    field(g, "note-off cuts", no);
-    field(g, "mod wheel", select(names.controls, p.mw, v => p.mw = v), "mw");
-    field(g, "aftertouch", select(names.controls, p.at, v => p.at = v), "at");
-    field(g, "pitch bend", select(names.controls, p.pb, v => p.pb = v), "pb");
+    field(g, "note-off cuts", no, null, F.noteOff);
+    field(g, "mod wheel", controlSelect(C, I, p, p.mw, v => p.mw = v), "mw", F.mw);
+    field(g, "aftertouch", controlSelect(C, I, p, p.at, v => p.at = v), "at", F.at);
+    field(g, "pitch bend", controlSelect(C, I, p, p.pb, v => p.pb = v), "pb", F.pb);
     c.append(g);
-    knobTable(c, p, names.controls);
+    knobTable(c, p, C, I);
     cards.append(c);
   });
   const rv = model.reverb;
@@ -207,33 +319,67 @@ function render() {
     const c = card("Plate reverb", rv.channel ? `channel ${rv.channel}` : "off", rv.channel);
     c.dataset.kind = "reverb";
     const g = document.createElement("div"); g.className = "fields";
+    const F = FIELD_INFO, R = names.reverb, I = REVERB_INFO;
     const ch = document.createElement("select"); chanOptions(ch, rv.channel, true); ch.onchange = () => { rv.channel = +ch.value; touch(); };
-    field(g, "channel", ch);
-    field(g, "first CC", num(rv.cc, 0, 127, 1, v => rv.cc = v));
-    field(g, "mod wheel", select(names.reverb, rv.mw, v => rv.mw = v), "mw");
-    field(g, "aftertouch", select(names.reverb, rv.at, v => rv.at = v), "at");
-    field(g, "pitch bend", select(names.reverb, rv.pb, v => rv.pb = v), "pb");
+    field(g, "channel", ch, null, F.reverbChannel);
+    field(g, "first CC", num(rv.cc, 0, 127, 1, v => rv.cc = v), null, F.cc);
+    field(g, "mod wheel", controlSelect(R, I, rv, rv.mw, v => rv.mw = v), "mw", F.mw);
+    field(g, "aftertouch", controlSelect(R, I, rv, rv.at, v => rv.at = v), "at", F.at);
+    field(g, "pitch bend", controlSelect(R, I, rv, rv.pb, v => rv.pb = v), "pb", F.pb);
     c.append(g);
-    knobTable(c, rv, names.reverb);
+    knobTable(c, rv, R, I);
     cards.append(c);
   }
   if (model.cutterChannel) {
     const c = card("Break cutter (ESP32)", `channel ${model.cutterChannel}`, model.cutterChannel);
     c.dataset.kind = "cutter";
     const t = document.createElement("table");
-    CUTTER_CCS.forEach((n, i) => {
+    CUTTER.forEach(([n, rng, desc], i) => {
       const r = t.insertRow(); r.className = "row"; r.dataset.cc = 16 + i;
       const cc = r.insertCell(); cc.className = "cc"; cc.textContent = 16 + i;
-      r.insertCell().textContent = n;
+      const ctl = r.insertCell(); ctl.className = "ctl"; ctl.append(n, infoLine([rng, desc]));
       const val = r.insertCell(); val.className = "val"; val.innerHTML = '<div class="bar"><i></i></div>';
     });
     c.append(t);
     const n = document.createElement("div"); n.className = "note";
-    n.textContent = "Set in the ESP's firmware. Mod wheel: release · notes: presets · pitch bend above the centre: the conductor plays the form.";
+    n.textContent = "Set in the ESP's firmware. " + CUTTER_MORE.map(([k, r, d]) => `${k} (${r}): ${d}`).join(" · ");
     c.append(n);
     cards.append(c);
   }
+  cards.append(reference());
   checks();
+}
+
+/* every parameter with its range and what it does, in one table */
+function reference() {
+  const c = document.createElement("div"); c.className = "card ref";
+  const d = document.createElement("details"); d.open = refOpen; d.ontoggle = () => { refOpen = d.open; };
+  d.innerHTML = '<summary>Parameters<span class="sub">ranges and what they do</span></summary>';
+  const t = document.createElement("table");
+  const sec = text => { const r = t.insertRow(); r.className = "sec"; const td = r.insertCell(); td.colSpan = 3; td.textContent = text; };
+  const row = (name, e) => {
+    const r = t.insertRow();
+    const n = r.insertCell(); n.className = "name"; n.textContent = name;
+    const g = r.insertCell(); g.className = "rng"; g.textContent = e[0];
+    r.insertCell().textContent = e[1];
+  };
+  const listed = (list, dict) => (list.length ? list : Object.keys(dict)).filter(k => k !== "none");
+  sec("Voice controls: on knobs, velocity, mod wheel, aftertouch or pitch bend (MIDI 0 .. 127)");
+  for (const k of listed(names.controls, CONTROL_INFO)) row(k, info(CONTROL_INFO, k, null));
+  sec("Plate reverb page (MIDI 0 .. 127)");
+  for (const k of listed(names.reverb, REVERB_INFO)) row(k, info(REVERB_INFO, k, null));
+  sec("Break cutter channel: CC 16 .. 26, then mod wheel, notes, pitch bend");
+  CUTTER.forEach(([n, r, s], i) => row(`CC ${16 + i} ${n}`, [r, s]));
+  for (const [n, r, s] of CUTTER_MORE) row(n, [r, s]);
+  sec("Page and global settings");
+  for (const [k, label] of [["channel", "channel"], ["voice", "voice"], ["cc", "first CC"], ["rate", "rate"],
+                            ["velocity", "velocity"], ["noteOff", "note-off cuts"], ["mw", "mod wheel"],
+                            ["at", "aftertouch"], ["pb", "pitch bend"], ["clockFollow", "follow MIDI clock"],
+                            ["cutterChannel", "cutter channel"], ["reverbChannel", "reverb channel"]])
+    row(label, FIELD_INFO[k]);
+  d.append(t);
+  c.append(d);
+  return c;
 }
 
 function checks() {
