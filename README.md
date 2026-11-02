@@ -158,8 +158,8 @@ default Machinedrum MIDI machines on channel 5 (drums, voice 0), 3 (melody, voic
 (third voice). Consecutive CCs from the page's first one (16, 16, 25) drive bufNum bank rate
 pitch gate interval (the 6 the MD's MIDI machine sends), then repeats fxSend overlap randPos
 randomPitch prob separation maxGrains tempoLock bgAdvance envHold pvTransient; velocity =
-volume (a multiplier on top of amp, also while the cutter plays voice 0), pitch bend = cutter
-handover (voice 0) / noteMode (the MD sends only its 7 coarse bits), mod wheel = grains / time
+volume (a multiplier on top of amp, also while the cutter plays voice 0: 0..1 up to 63, then
+up to +12 dB at 127), pitch bend = cutter handover (voice 0) / noteMode (the MD sends only its 7 coarse bits), mod wheel = grains / time
 stretcher, aftertouch = grainDur. gate: 1/32 bar .. 16 bars, exponential (64 ~ 3/4 bar), also
 while the cutter plays. `"noteOff": false` on a page: note-offs don't end its gate. `midimap defaults` rewrites the
 file with these (the old one stays as `/midimap.json.bak`). Other channels use the Monomachine

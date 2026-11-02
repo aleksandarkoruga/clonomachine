@@ -27,6 +27,7 @@ static int32_t q16(double v) { return (int32_t)(v * 65536.0 + (v >= 0 ? 0.5 : -0
 static int32_t lut_rate[128], lut_pitch[128], lut_grain[128], lut_overlap[128], lut_randpitch[128];
 static int32_t lut_interval[129]; /* bend: lincurve(0..1 -> 1e-6..0.25 s, curve 5), 128 steps */
 static int32_t lut_rate_bi[128], lut_amp[128], lut_graindur_at[128], lut_gate[128]; /* Machinedrum pages */
+static int32_t lut_vol[128]; /* 0 .. 1 at 63 linear, then equal dB steps to 4 (+12 dB) at 127 */
 
 void mapping_init(void) {
     for (int v = 0; v < 128; ++v) {
@@ -38,6 +39,7 @@ void mapping_init(void) {
         lut_randpitch[v] = q16(bilin(v, 63, 0, 127, 0, -2, 2));
         lut_rate_bi[v] = q16(bilin(v, 63, 0, 127, 1, -2, 2));
         lut_amp[v] = q16(bilin(v, 63, 0, 127, 1, 0, 2));
+        lut_vol[v] = q16(v <= 63 ? v / 63.0 : d_exp(d_log(4.0) * (v - 63) / 64.0));
         lut_gate[v] = q16(linexp(v, 1.0 / 32, 16.0)); /* bars: 1/32 .. 16, exponential */
         lut_graindur_at[v] = q16(linexp(v, 0.005, 0.5));
     }
@@ -380,7 +382,7 @@ static void apply(int pi, int t, int v) {
     case MT_OUT: raw_param(s, P_OUT, v * 3 / 128); break;
     case MT_REPEATS: raw_param(s, P_REPEATS, v > 126 ? 126 : v); break;
     case MT_FXSEND: raw_param(s, P_FXSEND, v * 65536 / 127); break; /* 0 .. 1 */
-    case MT_VOLUME: g_slots[s].vol_q16 = lut_amp[v]; slot_apply_output(s); break;
+    case MT_VOLUME: g_slots[s].vol_q16 = lut_vol[v]; slot_apply_output(s); break;
     default: break;
     }
 }

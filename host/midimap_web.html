@@ -137,7 +137,7 @@ const CONTROL_INFO = {
   cutter: ["cutter < 64 ≤ MIDI", "Drums only: below 64 the ESP32 break cutter plays the voice, from 64 MIDI does."],
   repeats: ["0 .. 126 retriggers (127 = 126)", "Stutter: retriggers after each note, one per interval."],
   fxSend: ["0 .. 1, linear", "Send into the plate reverb (it comes back on the right output)."],
-  volume: ["0 .. 1 at 63 .. 2, linear", "Volume on top of amp; the default velocity target (63 = unity), also while the cutter plays."],
+  volume: ["0 .. 1 at 63, linear; then equal dB steps to 4 (+12 dB) at 127 (95 = +6 dB)", "Volume on top of amp; the default velocity target (63 = unity), also while the cutter plays."],
 };
 const REVERB_INFO = {
   none: ["–", "Not used."],
