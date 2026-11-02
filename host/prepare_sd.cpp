@@ -14,6 +14,7 @@
 //   ./prepare_sd /run/media/$USER/CARD            # report only
 //   ./prepare_sd /run/media/$USER/CARD --write    # convert in place + write the caches
 //   ./prepare_sd CARD --csv table.csv             # also: one line per sample (length, bpm, transients)
+//   ./prepare_sd CARD --only melody --write       # one folder only, the others are not touched
 //
 // Files that are already mono 16-bit with full-scale peaks are left as they are. Formats the
 // firmware can't read (e.g. ADPCM) are left alone and get no records.
@@ -467,21 +468,24 @@ static void do_lib(const fs::path& dir, bool write, Totals& tot) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::printf("usage: %s <card mount point> [--write]\n", argv[0]);
+        std::printf("usage: %s <card mount point> [--write] [--csv file] [--only folder]\n", argv[0]);
         return 1;
     }
     const fs::path root = argv[1];
     bool write = false;
+    const char* only = nullptr;
     for (int i = 2; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--write"))
             write = true;
         else if (!std::strcmp(argv[i], "--csv") && i + 1 < argc)
             g_csv = std::fopen(argv[++i], "w");
+        else if (!std::strcmp(argv[i], "--only") && i + 1 < argc)
+            only = argv[++i];
     }
     Totals tot;
     for (const char* lib : kLibs) {
         const fs::path d = root / lib;
-        if (!fs::is_directory(d))
+        if ((only && std::strcmp(only, lib)) || !fs::is_directory(d))
             continue;
         std::printf("/%s\n", lib);
         do_lib(d, write, tot);

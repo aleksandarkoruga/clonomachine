@@ -6,6 +6,7 @@
 #   host/prepare_sd.sh /run/media/$USER/FPGA                    # report only
 #   host/prepare_sd.sh /run/media/$USER/FPGA --write            # backup, convert, write caches
 #   host/prepare_sd.sh /run/media/$USER/FPGA --csv table.csv    # + one line per sample
+#   host/prepare_sd.sh /run/media/$USER/FPGA --only melody --write   # one folder (and its backup)
 #
 # New samples: copy them into /drums or /melody (subfolders = banks), run with --write. Files
 # already converted are left as they are; every cache is rewritten.
@@ -21,21 +22,24 @@ if [[ ! -x "$BIN" ]] || [[ -n "$(find "$ROOT/host/prepare_sd.cpp" "$ROOT/fw/tran
     g++ -O2 -std=c++17 -I"$ROOT/fw" -I"$ROOT/include" "$ROOT/host/prepare_sd.cpp" \
         "$OUT/wavutil.o" "$OUT/transients.o" -o "$BIN"
 fi
-CARD="${1:?usage: $0 <card mount point> [--write] [--no-backup] [--csv file]}"
+CARD="${1:?usage: $0 <card mount point> [--write] [--no-backup] [--csv file] [--only folder]}"
 shift
-ARGS=() WRITE=0 BACKUP=1
-for a in "$@"; do
-    case "$a" in
-    --write) WRITE=1; ARGS+=("$a") ;;
+ARGS=() WRITE=0 BACKUP=1 ONLY=
+while (( $# )); do
+    case "$1" in
+    --write) WRITE=1; ARGS+=("$1") ;;
     --no-backup) BACKUP=0 ;;
-    *) ARGS+=("$a") ;;
+    --only) ONLY="${2:?--only needs a folder}"; ARGS+=("$1" "$2"); shift ;;
+    *) ARGS+=("$1") ;;
     esac
+    shift
 done
 if (( WRITE && BACKUP )); then
-    DEST=~/Music/fpga_sd_backup_$(date +%F_%H%M)
-    echo "backing up $CARD to $DEST ..."
-    cp -a "$CARD/." "$DEST"
-    diff -rq "$CARD" "$DEST" >/dev/null && echo "backup verified"
+    SRC="$CARD${ONLY:+/$ONLY}"
+    DEST=~/Music/fpga_sd_backup_$(date +%F_%H%M)${ONLY:+_$ONLY}
+    echo "backing up $SRC to $DEST ..."
+    cp -a "$SRC/." "$DEST"
+    diff -rq "$SRC" "$DEST" >/dev/null && echo "backup verified"
 fi
 "$BIN" "$CARD" "${ARGS[@]}"
 if (( WRITE )); then
