@@ -198,8 +198,10 @@ table.
   semantics; switches live with a 5 ms crossfade. Every slot output has a constant
   2.7 ms latency (the PV start-up time), so grain and PV slots stay in sync. Pinned pos +
   PV = spectral freeze. Paulstretch: next.
-- `/slot/n/noteMode`: 0 note → equal 16ths (as SC), 1 note k → k-th transient, 2 16ths
-  snapped to the nearest transient.
+- `/slot/n/noteMode`: 0 notes 0..127 spread over the sample (0 = the first frame, 127 =
+  the last), 1 note k → transient k mod n (note 0 = the first, so with 4 transients notes
+  0 4 8 .. play the first), 2 the note's position moved to the nearest transient within
+  half a 16th. A sample without transients (or not analysed yet) plays as 0.
 - Gate: `(CC10+1)/32` bar in real time (`240/bpm` s per bar, measured engine rate),
   identical for every loop at a given bpm. A note-off ends the gate early (1 ms ramp), so
   the gate length is the longest a note plays; `envHold 1` keeps it open until the note-off.

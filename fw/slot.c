@@ -5,7 +5,7 @@
  *   tempoRatio = globalBpm / trackBpm            (1 when tempo lock is off)
  *   PHASOR_INC = rate * tempoRatio * bufSR / fs  (fs = measured engine rate)
  *   gate       = envBars * 240/globalBpm s       (real time, the same for every loop)
- *   note->pos  = ((note-12) mod N16) / N16, N16 = 16 * nBars = 4 * 2^k sixteenths
+ *   note->pos  = note / 127 of the sample (noteMode 0), transient note mod n (1)
  *
  * Buffer switches are seamless: the engine keeps every running grain on the buffer it
  * started in, and the playhead is moved (SEEK) to the same sixteenth of the bar in the
@@ -346,33 +346,36 @@ static int32_t fmod_i(int32_t a, int32_t n) {
     return m < 0 ? m + n : m; /* SC % is a floored modulo */
 }
 
+/* note -> start position. noteMode 0: notes 0..127 spread over the sample (0 = the first
+   frame, 127 = the last); 1: note k = transient k mod n (note 0 = the first); 2: the note's
+   position moved to the nearest transient within half a 16th. Without transients (or not
+   analysed yet) every mode is 0. */
 void slot_note_on(int s, int note, int repeats) {
     struct slot* sl = &g_slots[s];
-    const int32_t n16 = (int32_t)slot_sixteenths(s);
-    const int32_t m = fmod_i(note - 12, n16);
-    sl->pos_q30 = (uint32_t)(((uint64_t)m << 30) / (uint32_t)n16);
     const struct sample* smp = cur_sample(s);
-    const uint32_t* tp;
-    const int nt = (sl->note_mode && smp) ? samples_transients(smp, &tp) : -1;
-    if (nt > 0 && smp->frames) {
-        uint32_t p = 0;
-        if (sl->note_mode == 1) {
-            p = tp[fmod_i(note - 12, nt)];                     /* k-th transient */
-        } else {
-            /* the 16th, moved to the nearest transient within half a 16th */
-            const uint32_t g = (uint32_t)(((uint64_t)m * smp->frames) / (uint32_t)n16);
-            const uint32_t half = smp->frames / (uint32_t)(2 * n16);
-            uint32_t best = half + 1;
-            p = g;
-            for (int k = 0; k < nt; ++k) {
-                const uint32_t d = tp[k] > g ? tp[k] - g : g - tp[k];
-                if (d < best) {
-                    best = d;
-                    p = tp[k];
+    const int32_t k = clampi(note, 0, 127);
+    if (smp && smp->frames) {
+        uint32_t p = (uint32_t)(((uint64_t)k * (smp->frames - 1)) / 127);
+        const uint32_t* tp;
+        const int nt = sl->note_mode ? samples_transients(smp, &tp) : -1;
+        if (nt > 0) {
+            if (sl->note_mode == 1) {
+                p = tp[fmod_i(note, nt)];
+            } else {
+                const uint32_t g = p;
+                uint32_t best = smp->frames / (2 * slot_sixteenths(s)) + 1;
+                for (int i = 0; i < nt; ++i) {
+                    const uint32_t d = tp[i] > g ? tp[i] - g : g - tp[i];
+                    if (d < best) {
+                        best = d;
+                        p = tp[i];
+                    }
                 }
             }
         }
         sl->pos_q30 = (uint32_t)(((uint64_t)p << 30) / smp->frames);
+    } else {
+        sl->pos_q30 = (uint32_t)(((uint64_t)k * 0x3FFFFFFF) / 127);
     }
     if (repeats >= 0)
         sl->repeats = repeats;

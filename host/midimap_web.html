@@ -132,7 +132,7 @@ const CONTROL_INFO = {
   pvTransient: [SWITCH, "Phase vocoder: keep transients sharp (Bungee's transient handling). On by default."],
   algo: ["grains < 64 ≤ phase vocoder", "Time stretcher: BufGrainPlay grains or the Bungee phase vocoder, 5 ms crossfade."],
   grainDur: ["5 ms .. 0.5 s, exponential (64 ≈ 50 ms)", "Grains: grain length."],
-  noteMode: ["0-42 grid · 43-85 transients · 86-127 snapped", "Note 12 + k starts at the k-th 16th, the k-th transient, or the k-th 16th moved to its nearest transient."],
+  noteMode: ["0-42 grid · 43-85 transients · 86-127 snapped", "Grid: notes 0..127 spread over the sample (0 = start, 127 = last frame). Transients: note k starts at transient k mod n (note 0 = the first). Snapped: the grid position moved to the nearest transient within half a 16th. A sample without transients plays as grid."],
   out: ["0-42 left · 43-85 right · 86-127 both", "Output channel of the voice."],
   cutter: ["cutter < 64 ≤ MIDI", "Drums only: below 64 the ESP32 break cutter plays the voice, from 64 MIDI does."],
   repeats: ["0 .. 126 retriggers (127 = 126)", "Stutter: retriggers after each note, one per interval."],
