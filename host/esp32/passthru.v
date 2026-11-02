@@ -1,7 +1,10 @@
 // ESP32 pass-through for the ULX3S (v3.1.6+ pinout, see host/esp32/README): the FT231X UART on
 // US1 goes straight to the on-board ESP32, and DTR / RTS give esptool its reset and boot-mode
 // sequence, as emard/ulx3s-passthru does: GPIO2 (sd_d0) is held low with GPIO0 so the ROM takes
-// the download mode. For programming or reading the ESP32 only: loaded into SRAM
+// the download mode. GPIO12 (sd_d2, the MTDI strap) is held low with them: high at reset (an SD
+// card in the slot pulls it up) selects 1.8 V for the flash, which then reads but does not write
+// (esptool: "flash voltage set by a strapping pin: 1.8V", MD5 mismatch after write_flash). For
+// programming or reading the ESP32 only: loaded into SRAM
 // (host/esp32/esp.sh), the sampler comes back at the next power-up or when its bitstream is
 // loaded again. The other SD card pins are left alone (inputs).
 module esp32_passthru (
@@ -14,6 +17,7 @@ module esp32_passthru (
     output       wifi_en,
     output       wifi_gpio0,
     output       sd_d0,      // ESP32 GPIO2
+    output       sd_d2,      // ESP32 GPIO12 (MTDI: flash voltage strap)
     output [7:0] led
 );
     assign wifi_rxd = ftdi_txd;
@@ -22,5 +26,6 @@ module esp32_passthru (
     assign wifi_en    = ~(~ftdi_nrts & ftdi_ndtr);
     assign wifi_gpio0 = ~(~ftdi_ndtr & ftdi_nrts);
     assign sd_d0      = wifi_gpio0 ? 1'bz : 1'b0;
+    assign sd_d2      = wifi_gpio0 ? 1'bz : 1'b0;
     assign led = {~ftdi_txd, ~wifi_txd, 4'b0, ~wifi_gpio0, ~wifi_en};
 endmodule
