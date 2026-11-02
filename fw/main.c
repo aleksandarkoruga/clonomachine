@@ -29,10 +29,13 @@ static void dispatch(const struct slip* d) {
     for (unsigned i = 0; i + 8 < d->len; i += 8) {
         struct smp_event e;
         memcpy(&e, d->buf + i, 8);
-        if (esplink_sim())
+        if (esplink_sim()) {
             esplink_sim_event(&e); /* the PC standing in for the ESP: its rules apply */
-        else
-            mapping_event(&e);
+            continue;
+        }
+        if (e.type == EV_RAW_PARAM && e.a == 0 && e.b == P_BUFNUM)
+            esplink_base_buf(e.value); /* OSC's sample for voice 0 is the cutter's, as the drum page's */
+        mapping_event(&e);
     }
 }
 

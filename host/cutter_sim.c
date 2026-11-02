@@ -1,8 +1,10 @@
 // Offline run of the break cutter (esp/cutter/cutter.c): feeds it the FPGA's messages for a
-// few phrases and prints what it would send, or a move histogram.
+// few phrases and prints what it would send, or a move histogram, and the silences (gate off to
+// the next trigger).
 //
 //   gcc -O2 -Wall -Iesp/cutter host/cutter_sim.c esp/cutter/cutter.c -lm -o build/host/cutter_sim
-//   build/host/cutter_sim [preset] [phrases] [bpm] [-q]
+//   build/host/cutter_sim [preset] [phrases] [bpm] [-q] [CC=value ...]
+//   build/host/cutter_sim 4 16 173.5 -q 16=127 27=1     # the tape preset pushed, 1 silence a phrase
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,10 +24,19 @@ int main(int argc, char** argv) {
     const int preset = argc > 1 ? atoi(argv[1]) : 1;
     const int phrases = argc > 2 ? atoi(argv[2]) : 2;
     const double bpm = argc > 3 ? atof(argv[3]) : 173.5;
-    const int quiet = argc > 4 && !strcmp(argv[4], "-q");
+    int quiet = 0;
     static struct cutter c;
     cut_init(&c, 12345);
     cut_preset(&c, preset);
+    for (int i = 4; i < argc; ++i) { /* the cutter channel's CCs, as the FPGA passes them on */
+        const char* eq = strchr(argv[i], '=');
+        if (!strcmp(argv[i], "-q"))
+            quiet = 1;
+        else if (eq) {
+            const struct smp_event cc = {EV_CC, 0, (uint8_t)atoi(argv[i]), (uint8_t)atoi(eq + 1), 0};
+            cut_rx(&c, &cc);
+        }
+    }
     const struct smp_event start = {EV_START, 0, 0, 0, 0}, b = {EV_BPM, 0, 0, 0, (int32_t)(bpm * 1000)},
                            own = {EV_OWNER, 0, 0, 1, 16};
     cut_rx(&c, &start);
@@ -34,13 +45,24 @@ int main(int argc, char** argv) {
     const double s32 = 60.0 / bpm / 8;
     const int steps = phrases * 128;
     struct cut_frame f;
-    int frames = 0, events = 0;
+    int frames = 0, events = 0, gaps = 0;
+    double off_at = -1, gap_sum = 0, gap_max = 0;
     printf("preset %s, %d phrases at %.1f bpm\n", cut_preset_name(preset), phrases, bpm);
     for (int s = 0; s < steps; ++s) {
         const double t = s * s32;
         while (cut_pop(&c, t, &f)) { /* due before this tick */
             ++frames;
             events += f.n;
+            for (int i = 0; i < f.n; ++i)
+                if (f.ev[i].b == P_GATEOFF && off_at < 0)
+                    off_at = f.due;
+                else if (f.ev[i].b == P_TRIG && off_at >= 0) {
+                    const double g = f.due - off_at;
+                    ++gaps;
+                    gap_sum += g;
+                    gap_max = g > gap_max ? g : gap_max;
+                    off_at = -1;
+                }
             if (!quiet) {
                 printf("%8.3f s  step %4d |", f.due, s);
                 for (int i = 0; i < f.n; ++i)
@@ -63,6 +85,7 @@ int main(int argc, char** argv) {
     for (int m = 0; m < CUT_NMOVES; ++m)
         if (c.stats_hits[m])
             printf(" %s %d", cut_move_name(m), c.stats_hits[m]);
-    printf("\n");
+    printf("\nsilences %d (%.2f per phrase), %.0f ms on average, longest %.0f ms\n", gaps, (double)gaps / phrases,
+           gaps ? 1000 * gap_sum / gaps : 0.0, 1000 * gap_max);
     return 0;
 }

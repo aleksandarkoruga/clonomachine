@@ -66,15 +66,20 @@ can still stand in for it over the console with the same protocol (`esp sim 1`):
 
 ```bash
 python host/cutter_live.py --preset 2           # p N, k energy 0.7, c 1, own 1, s, q
-build/host/cutter_sim 2 8 173.5 -q              # offline: move histogram per preset
+build/host/cutter_sim 2 8 173.5 -q              # offline: move histogram + silences per preset
+build/host/cutter_sim 6 16 173.5 -q 16=127 27=1 # ... with cutter-channel CCs (energy up, 1 silence)
 ```
 
 It plays voice 0 only while it owns it (drum page pitch bend below the centre, or `cutter 1`).
 MIDI channel 7 (`cutterChannel`) goes to it: CC 16.. energy density syncopation anchor build
-character release memory surprise, CC 25 phrase bars (1..16), CC 26 phrases per section (1..8),
-mod wheel = release, notes = presets, pitch bend above the centre = the conductor plays the
-form. The drum page's sample knob picks the cutter's sample; its velocity (volume) and gate
-stay MIDI's, so the gate knob sets how long each cut sounds.
+character release memory surprise, CC 25 phrase bars (the value, 1..127), CC 26 phrases per
+section (1..8), CC 27 silences per phrase at most (drops and staccato gaps; 0 none, 127 no
+limit, 1 at start-up; a release that drops out keeps one for itself), CC 28 samples (below 64
+only the drum page's, from 64 the cutter may switch; switching at start-up), mod wheel =
+release, notes = presets, pitch bend above the centre = the conductor plays the form. The drum
+page's sample knob (or OSC `/slot/0/bufNum`) picks the cutter's sample; its velocity (volume)
+and gate stay MIDI's, so the gate knob sets how long each cut sounds. After a stutter, a
+ratchet or a silence the loop comes back on the next 16th, at full volume.
 Presets: straight, edits, jungle, drill, tape, v13, texture.
 
 ## OSC

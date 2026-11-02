@@ -20,10 +20,12 @@
  *
  * The FPGA sends a tick every 32nd (EV_TICK), the bpm, start/stop, who owns voice 0 and the
  * sample's length in 16ths, and the MIDI messages of the cutter channel (CC 16.. = the knobs,
- * CC 25 phrase bars 1..16, CC 26 phrases per section 1..8, notes = presets, pitch bend =
- * conductor auto / manual). The cutter answers with frames of EV_RAW_PARAM events for slot 0,
- * some of them delayed (ratchets, tape stops). Gate length and volume stay MIDI's (the drum
- * page): the cutter's staccato only closes a gate early.
+ * CC 25 phrase bars 1..127, CC 26 phrases per section 1..8, CC 27 silences per phrase at most
+ * (127: no limit), CC 28 samples: below 64 only the drum page's, from 64 the cutter may switch;
+ * notes = presets, pitch bend = conductor auto / manual). The cutter answers with frames of
+ * EV_RAW_PARAM events for slot 0, some of them delayed (ratchets, tape stops). Gate length and
+ * volume stay MIDI's (the drum page): the cutter's staccato only closes a gate early. After a
+ * stutter, a ratchet or a silence the loop comes back on the next 16th, at full volume.
  */
 #ifndef CUTTER_H
 #define CUTTER_H
@@ -56,7 +58,11 @@ struct cut_params {
     float accel;            /* ratchets: 0 even .. 1 accelerating like repeatDur / (1 + k) */
     int beats_per_bar, phrase_bars, section_phrases;
     int base_buf;           /* sample in voice 0's bank the cutter plays */
+    int max_silences;       /* drops / staccato gaps per phrase, -1: no limit */
+    int swap;               /* 1: the cutter may switch samples, 0: only base_buf */
 };
+
+#define CUT_MAX_BARS 127   /* phrase length */
 
 #define CUT_MAX_EV 12      /* events per frame */
 #define CUT_QUEUE 64       /* frames waiting for their time */
@@ -80,9 +86,11 @@ struct cutter {
     /* phrase state */
     uint32_t phrase_seed, rng_fresh, rng_phrase;
     uint32_t phrase_idx;
-    uint16_t bar_pattern[16];  /* hits per bar of the phrase (bit k = 16th k) */
+    uint16_t bar_pattern[CUT_MAX_BARS]; /* hits per bar of the phrase (bit k = 16th k) */
     int cond_state, cond_next;
     double busy_until;         /* a ratchet / tape stop owns the voice until then */
+    int resume;                /* then the loop again, on the next 16th */
+    int silences;              /* in this phrase */
     int last_buf;
     float last_rate;
     int stats_hits[16];        /* moves taken, for the console / tests */
@@ -100,6 +108,8 @@ const char* cut_preset_name(int n);
 void cut_set_knob(struct cutter* c, int k, float v);
 void cut_set_conductor(struct cutter* c, int on);
 void cut_set_phrase(struct cutter* c, int bars, int sections); /* 0 keeps; from the next phrase */
+void cut_set_silences(struct cutter* c, int n);        /* per phrase at most, < 0: no limit */
+void cut_set_swap(struct cutter* c, int on);           /* 0: only the drum page's sample */
 /* the host's clock in seconds: set it before cut_rx, which schedules from it */
 void cut_clock(struct cutter* c, double t);
 /* an event from the FPGA (EV_TICK, EV_BPM, EV_START, EV_STOP, EV_OWNER, EV_LOAD_BUF, the

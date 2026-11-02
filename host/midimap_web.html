@@ -164,8 +164,10 @@ const CUTTER = [ /* the cutter channel's CC 16.., each 0..127 */
   ["release", "0 .. half the phrase", "Phrase ending where the loop runs, fills or drops out (also the mod wheel)."],
   ["memory", "0 .. 1", "0: new dice every phrase .. 1: the same phrase again."],
   ["surprise", "0 .. 1", "Wider choice of moves, more abrupt conductor changes."],
-  ["phrase bars", "1 .. 16 bars", "Phrase length, from the next phrase."],
+  ["phrase bars", "the value = bars, 1 .. 127", "Phrase length, from the next phrase."],
   ["phrases / section", "1 .. 8", "Phrases per section of the conductor's form."],
+  ["silences", "0 none · 1 .. 126 per phrase · 127 no limit (1 at start-up)", "Most drops and staccato gaps in a phrase; a release that drops out keeps one for itself."],
+  ["samples", "< 64 drum page's only · ≥ 64 the cutter may switch", "Whether the cutter only plays the sample the drum page (or OSC) picks, or may swap to its neighbours."],
 ];
 const CUTTER_MORE = [
   ["mod wheel", "0 .. 127", "Release, like its CC."],
