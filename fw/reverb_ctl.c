@@ -145,6 +145,7 @@ void rv_init(struct rv_ctl* c, uint32_t fs, uint32_t seed, const struct rv_param
     const double longest = 0.040 * fs, shortest = 0.0001 * fs < 4 ? 4 : 0.0001 * fs;
     c->log_max = Q16(d_log2(longest));
     c->log_min = Q16(d_log2(shortest));
+    c->inv_range = ((uint64_t)1 << 40) / (uint32_t)(c->log_max - c->log_min);
     for (int r = 0; r < RV_RAILS; ++r) {
         c->rand1[r] = frand(c) - 32768;
         c->rand2[r] = frand(c) - 32768;
@@ -201,8 +202,9 @@ void rv_block(struct rv_ctl* c, struct rv_regs* out) {
         else if (prev > slew && d < prev - slew)
             d = prev - slew;
         c->len[r] = out->target[r] = d;
-        /* loss for the length read: table over log2 length, interpolated */
-        const int64_t x = ((int64_t)(lr - c->log_min) << 8) * 65536 / (c->log_max - c->log_min); /* Q16 index */
+        /* loss for the length read: table over log2 length, interpolated; the Q16 index is
+           (lr - log_min) * 2^24 / range, by the reciprocal (a 64-bit division here cost 40 us a rail) */
+        const int64_t x = (int64_t)(((uint64_t)(uint32_t)(lr - c->log_min) * c->inv_range) >> 16);
         int32_t i = (int32_t)(x >> 16);
         int32_t f = (int32_t)(x & 0xFFFF);
         if (i >= 256) {

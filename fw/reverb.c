@@ -117,6 +117,22 @@ static void print_q16(const char* name, int32_t v, const char* unit) {
     printf(" %s %lu.%03lu%s", name, (unsigned long)(v >> 16), (unsigned long)(((v & 0xFFFF) * 1000) >> 16), unit);
 }
 
+/* `revbench`: the control block's cost, on a copy (the plate itself is not touched) */
+void reverb_bench(void) {
+    static struct rv_ctl c;
+    static struct rv_regs o;
+    c = g_rv;
+    const uint32_t t0 = eng_status(SMP_SG_SAMPLES);
+    for (int i = 0; i < 500; ++i)
+        rv_block(&c, &o);
+    const uint32_t t1 = eng_status(SMP_SG_SAMPLES);
+    for (int i = 0; i < 500; ++i)
+        write_regs(0);
+    const uint32_t t2 = eng_status(SMP_SG_SAMPLES);
+    printf("rv_block %lu us, write_regs %lu us (each)\n", (unsigned long)((t1 - t0) * 1000 / 48 / 500),
+           (unsigned long)((t2 - t1) * 1000 / 48 / 500));
+}
+
 void reverb_status(void) {
     printf("rev:");
     for (int k = RK_SIZE; k <= RK_GLIDEMODE; ++k)

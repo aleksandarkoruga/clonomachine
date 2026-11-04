@@ -38,6 +38,7 @@ struct rv_ctl {
     uint32_t fs, rng;
     struct rv_params p;
     int32_t log_min, log_max;                 /* log2(samples), Q16 */
+    uint64_t inv_range;                       /* 2^40 / (log_max - log_min): the table index without a division */
     int32_t rand1[RV_RAILS], rand2[RV_RAILS]; /* -0.5 .. 0.5, Q16  */
     int32_t log_target[RV_RAILS], remain[RV_RAILS];
     int32_t lag[RV_RAILS];                    /* per block: lag mode remaining fraction Q30, rate mode octaves Q16 */

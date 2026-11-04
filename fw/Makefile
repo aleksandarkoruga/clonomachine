@@ -20,8 +20,9 @@ sampler.elf: $(OBJECTS) linker.ld
 	$(CC) $(LDFLAGS) -T linker.ld -N -o $@ $(OBJECTS) \
 		$(PACKAGES:%=-L$(BUILD_DIR)/software/%) \
 		-Wl,--start-group $(FW_LIBS:lib%=-l%) -Wl,--end-group \
-		-Wl,--gc-sections -Wl,-Map,$@.map
+		-Wl,--gc-sections -Wl,-Map,$@.map -Wl,--wrap=flush_l2_cache
 
+# flush_l2_cache goes through samples.c (skipped inside SD reads, see sd_read)
 # hot loader / format conversion code: speed over size
 samples.o transients.o wavutil.o: CFLAGS += -O2
 

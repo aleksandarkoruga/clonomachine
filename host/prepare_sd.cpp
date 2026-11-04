@@ -402,12 +402,7 @@ static void do_lib(const fs::path& dir, bool write, Totals& tot) {
             int16_t pp = 0;
             for (int16_t v : part)
                 pp = std::max<int16_t>(pp, v == -32768 ? 32767 : int16_t(std::abs(v)));
-            if (pp > 0 && pp < 32767) { /* the board's load-time gain (fw/samples.c job_start + wav_convert) */
-                const int32_t g = int32_t((32767u << 16) / uint32_t(pp));
-                std::vector<int16_t> scaled(n);
-                wav_convert(scaled.data(), reinterpret_cast<const uint8_t*>(part.data()), n, WAV_PCM, 1, 16, g);
-                part.swap(scaled);
-            }
+            /* a part plays at the file's own level (fw/samples.c load_gain): analysed as it is */
             uint32_t pos[TR_MAX];
             const int nt = tr_analyse(get16, &part, n, TR_BINS, pos, nullptr);
             if (parts == 1 && dir.filename() == "drums") { /* the tempo fit: every onset, not one per bin */

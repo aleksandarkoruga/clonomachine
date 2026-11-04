@@ -176,7 +176,8 @@ static uint32_t pool_alloc(uint32_t words, int max_keep) {
 /* Pads from the data already in SDRAM, optional peak scan / normalise, cache flush. */
 static void finish_buffer(volatile int16_t* d, struct sample* s, int normalized) {
     const uint32_t F = s->frames;
-    if (!s->peak) {
+    const int whole = s->nseg <= 1; /* the parts of a split file play at the file's own level */
+    if (!s->peak && whole) {
         int16_t pk = 1;
         for (uint32_t i = 0; i < F; ++i) {
             if (!(i & 8191))
@@ -188,7 +189,7 @@ static void finish_buffer(volatile int16_t* d, struct sample* s, int normalized)
         }
         s->peak = pk;
     }
-    if (!normalized && g_normalize && s->peak < 32767) {
+    if (!normalized && g_normalize && whole && s->peak < 32767) {
         const int32_t g = (int32_t)((32767u << 16) / (uint32_t)s->peak);
         for (uint32_t i = 0; i < F; ++i) {
             if (!(i & 8191))
@@ -205,6 +206,14 @@ static void finish_buffer(volatile int16_t* d, struct sample* s, int normalized)
 #ifdef CONFIG_L2_SIZE
     flush_l2_cache(); /* the engine reads SDRAM directly, behind the CPU's L2 */
 #endif
+}
+
+/* Load-time gain (Q16): a whole file below full scale is normalised (the files the PC tool
+   prepared are at full scale already, so this is only for files copied to the card as they
+   are); the parts of a split file play at the file's own level. */
+static int32_t load_gain(const struct sample* s) {
+    return (g_normalize && s->nseg <= 1 && s->peak > 0 && s->peak < 32767) ? (int32_t)((32767u << 16) / (uint32_t)s->peak)
+                                                                         : 65536;
 }
 
 /* Largest sample a bank holds. */
@@ -334,17 +343,39 @@ static DSTATUS sd_init(BYTE d) {
 /* The SD DMA engine needs word-aligned buffers; FatFs reads straight into the caller's
    buffer, which is unaligned e.g. for 24-bit stereo (6-byte frames). Bounce those. */
 static uint32_t g_bounce[512 / 4];
+/* sdcard_read flushes the L2 cache after every transfer, 1 ms each (it reads 16 KB of SDRAM),
+   though only the engine needs that: it reads SDRAM behind the L2, while the SD DMA and the
+   CPU both go through it. finish_buffer flushes once per sample, so inside sd_read the flush
+   is skipped (the firmware is linked with -Wl,--wrap=flush_l2_cache, fw/Makefile); the L1
+   flush after each transfer stays. */
+static int g_in_sd_read;
+void __real_flush_l2_cache(void);
+void __wrap_flush_l2_cache(void);
+void __wrap_flush_l2_cache(void) {
+    if (!g_in_sd_read)
+        __real_flush_l2_cache();
+}
+
+static uint32_t g_sd_time, g_sd_calls;
 static DRESULT sd_read(BYTE d, BYTE* b, LBA_t sec, UINT n) {
     (void)d;
     drain_hook();
+    ++g_sd_calls;
+    DRESULT res = RES_OK;
+    g_in_sd_read = 1;
+    const uint32_t t = now_samples();
     if (((uintptr_t)b & 3) == 0)
-        return sdcard_read((uint32_t)sec, n, b) == SD_OK ? RES_OK : RES_ERROR;
-    for (UINT i = 0; i < n; ++i, b += 512) {
-        if (sdcard_read((uint32_t)sec + i, 1, (uint8_t*)g_bounce) != SD_OK)
-            return RES_ERROR;
-        memcpy(b, g_bounce, 512);
-    }
-    return RES_OK;
+        res = sdcard_read((uint32_t)sec, n, b) == SD_OK ? RES_OK : RES_ERROR;
+    else
+        for (UINT i = 0; i < n && res == RES_OK; ++i, b += 512) {
+            if (sdcard_read((uint32_t)sec + i, 1, (uint8_t*)g_bounce) != SD_OK)
+                res = RES_ERROR;
+            else
+                memcpy(b, g_bounce, 512);
+        }
+    g_sd_time += now_samples() - t;
+    g_in_sd_read = 0;
+    return res;
 }
 static DRESULT sd_write(BYTE d, const BYTE* b, LBA_t sec, UINT n) {
     (void)d;
@@ -789,7 +820,9 @@ static uint8_t g_io[32768] __attribute__((aligned(4)));
 
 static uint32_t g_load_bytes, g_load_ms, g_load_count;
 static uint32_t g_idle_since;
-static uint32_t g_t_read, g_t_copy, g_t_hook; /* this file's time (samples): reads, conversion, hooks */
+/* this file's time (engine samples): open + seek, reads (of which in sd_read, and its calls),
+   gain / conversion, the loader's breaks, finishing */
+static uint32_t g_t_open, g_t_read, g_t_copy, g_t_hook, g_t_fin;
 
 static int bank_complete(int lib, const struct bank* b) {
     for (int i = 0; i < b->count; ++i)
@@ -917,7 +950,12 @@ static int job_start(void) {
         struct sample* s = &L->s[b->first + idx];
         char path[SAMPLE_NAME_LEN + 16];
         path_of(path, sizeof(path), r.lib, s->name);
-        if (f_open(&g_job.f, path, FA_READ) != FR_OK || f_lseek(&g_job.f, s->data_off) != FR_OK) {
+        g_t_open = g_t_read = g_t_copy = g_t_hook = g_t_fin = 0;
+        g_sd_time = g_sd_calls = 0;
+        const uint32_t to = now_samples();
+        const int opened = f_open(&g_job.f, path, FA_READ) == FR_OK && f_lseek(&g_job.f, s->data_off) == FR_OK;
+        g_t_open = now_samples() - to;
+        if (!opened) {
             printf("SD: cannot open %s\n", path);
             s->ready = 1; /* silence rather than retrying forever */
             continue;
@@ -931,10 +969,9 @@ static int job_start(void) {
         g_job.req_lib = r.lib;
         g_job.req_bank = r.bank;
         g_job.done = 0;
-        g_job.normalized = g_normalize && s->peak > 0 && s->peak < 32767;
-        g_job.gain = g_job.normalized ? (32767u << 16) / (uint32_t)s->peak : 65536;
-        g_job.t0 = now_samples();
-        g_t_read = g_t_copy = g_t_hook = 0;
+        g_job.gain = (uint32_t)load_gain(s);
+        g_job.normalized = g_job.gain != 65536;
+        g_job.t0 = to;
         g_job_bank = b;
         if (g_sd_verbose)
             printf("[load %s/%s:%d %s%s]\n", L->dir, b->name, idx, s->name, g_job.prio ? " (wanted)" : "");
@@ -942,10 +979,10 @@ static int job_start(void) {
     }
 }
 
-/* A split file's part gets its own gain (32767 / the part's peak, Q16), in place. No sample
-   exceeds the part's peak, so x * g < 2^31: 32-bit products, no saturation, two samples per
-   word; the same values as wav_convert's. o is word aligned. */
-static void part_gain(int16_t* o, uint32_t n, int32_t g) {
+/* That gain in place. No sample exceeds the peak it was computed from, so x * g < 2^31: 32-bit
+   products, no saturation, two samples per word; the same values as wav_convert's. o is word
+   aligned. */
+static void gain_in_place(int16_t* o, uint32_t n, int32_t g) {
     uint32_t* w = (uint32_t*)o;
     for (uint32_t i = 0; i < n / 2u; ++i) {
         const uint32_t v = w[i];
@@ -960,8 +997,8 @@ static void part_gain(int16_t* o, uint32_t n, int32_t g) {
    frames converted, 0 at the end or on a read error. Mono 16-bit files (every file the PC
    tool prepared) go straight from the card into SDRAM by DMA, in chunks that end on 32 KB
    boundaries of the file (FatFs then reads whole sectors into place, one command per chunk
-   with 16 or 32 KB clusters, also for the parts of a long file); only a part's own gain (split
-   files are normalised per part) is applied in place. sdcard_read flushes the CPU caches. */
+   with 16 or 32 KB clusters, also for the parts of a long file); a load gain (load_gain) is
+   applied in place. sdcard_read flushes the CPU caches. */
 static uint32_t read_chunk(FIL* f, const struct sample* s, volatile int16_t* d, uint32_t done, int32_t gain) {
     if (s->fmt == WAV_PCM && s->ch == 1 && s->bits == 16 && !(s->data_off & 3)) {
         const uint32_t at = s->data_off + done * 2u, room = sizeof(g_io) - (at & (sizeof(g_io) - 1u));
@@ -978,7 +1015,7 @@ static uint32_t read_chunk(FIL* f, const struct sample* s, volatile int16_t* d, 
         g_t_hook += (t = now_samples()) - t1;
         const uint32_t got = n / 2u;
         if (gain != 65536 && got) {
-            part_gain(o, got, gain);
+            gain_in_place(o, got, gain);
             g_t_copy += (t1 = now_samples()) - t;
             idle_hook();
             g_t_hook += now_samples() - t1;
@@ -1024,13 +1061,14 @@ static int job_chunk(void) {
 static void job_finish(void) {
     struct bank* b = samples_bank(g_job.lib, g_job.bank);
     struct sample* s = samples_get(g_job.lib, g_job.bank, g_job.idx);
+    const uint32_t tf = now_samples();
     f_close(&g_job.f);
     if (g_job.done < s->frames) /* short read: keep the frame count (bank layout), zero the rest */
         for (uint32_t i = g_job.done; i < s->frames; ++i)
             g_mem[b->base + s->offset + SMP_PREPAD + i] = 0;
     const int had_peak = s->peak != 0;
     finish_buffer(g_mem + b->base + s->offset + SMP_PREPAD, s, g_job.normalized);
-    if (!had_peak)
+    if (!had_peak && s->peak)
         g_idx_dirty[g_job.lib] = 1;
     s->ready = 1;
     if (bank_complete(g_job.lib, b))
@@ -1038,9 +1076,15 @@ static void job_finish(void) {
     const uint32_t ms = (now_samples() - g_job.t0) / 48;
     g_load_ms += ms;
     ++g_load_count;
-    if (g_sd_verbose)
-        printf("[done %s %lu ms: read %lu, convert %lu, hooks %lu]\n", s->name, (unsigned long)ms,
-               (unsigned long)(g_t_read / 48), (unsigned long)(g_t_copy / 48), (unsigned long)(g_t_hook / 48));
+    g_t_fin = now_samples() - tf;
+    if (g_sd_verbose) {
+        const uint32_t busy = g_t_open + g_t_read + g_t_copy + g_t_hook + g_t_fin, all = ms * 48;
+        printf("[done %s %lu ms: open %lu, read %lu (sd %lu in %lu calls), gain %lu, breaks %lu, finish %lu, main loop %lu]\n",
+               s->name, (unsigned long)ms, (unsigned long)(g_t_open / 48), (unsigned long)(g_t_read / 48),
+               (unsigned long)(g_sd_time / 48), (unsigned long)g_sd_calls, (unsigned long)(g_t_copy / 48),
+               (unsigned long)(g_t_hook / 48), (unsigned long)(g_t_fin / 48),
+               (unsigned long)(all > busy ? (all - busy) / 48 : 0));
+    }
     g_job.active = 0;
     g_job_bank = 0;
 }
@@ -1094,6 +1138,15 @@ void samples_sdbench(void) {
     uint32_t ms = (now_samples() - t0) / 48;
     printf("raw sdcard_read 64-block: 2048 KB in %lu ms = %lu KB/s\n", (unsigned long)ms,
            (unsigned long)(ms ? 2048000 / ms : 0));
+    /* what sdcard_read adds after every transfer: the CPU cache flushes */
+    t0 = now_samples();
+    for (int i = 0; i < 1000; ++i)
+        flush_cpu_dcache();
+    const uint32_t t1 = now_samples();
+    for (int i = 0; i < 1000; ++i)
+        flush_l2_cache();
+    printf("flush_cpu_dcache %lu us, flush_l2_cache %lu us (each)\n", (unsigned long)((t1 - t0) * 1000 / 48 / 1000),
+           (unsigned long)((now_samples() - t1) * 1000 / 48 / 1000));
     for (int pass = 0; pass < 2; ++pass) {
         const UINT chunk = pass ? 32768 : 8192;
         char path[SAMPLE_NAME_LEN + 16];
@@ -1113,6 +1166,45 @@ void samples_sdbench(void) {
         printf("f_read %5u B chunks: %lu KB in %lu ms = %lu KB/s\n", chunk, (unsigned long)(total / 1024),
                (unsigned long)ms, (unsigned long)(ms ? total / ms : 0));
     }
+}
+
+/* `verify <lib> <bank>`: every loaded sample of the bank, as the engine sees it (SDRAM behind
+   the L2, written back first), against its file on the card. Mono 16-bit files at unity load
+   gain only (every file the PC tool prepared). */
+void samples_verify(int lib, int bank) {
+    struct bank* b = samples_bank(lib, bank);
+    if (!b || !g_card_ok || b->base == NOT_RESIDENT) {
+        printf("bank not loaded\n");
+        return;
+    }
+    __real_flush_l2_cache();
+    flush_cpu_dcache();
+    int checked = 0, bad_samples = 0;
+    for (int i = 0; i < b->count; ++i) {
+        const struct sample* s = &g_libs[lib].s[b->first + i];
+        if (!s->ready || s->fmt != WAV_PCM || s->ch != 1 || s->bits != 16 || load_gain(s) != 65536)
+            continue;
+        char path[SAMPLE_NAME_LEN + 16];
+        FIL f;
+        UINT n;
+        path_of(path, sizeof(path), lib, s->name);
+        if (f_open(&f, path, FA_READ) != FR_OK || f_lseek(&f, s->data_off) != FR_OK)
+            continue;
+        const volatile int16_t* d = g_mem + b->base + s->offset + SMP_PREPAD;
+        uint32_t bad = 0, k = 0;
+        while (k < s->frames && f_read(&f, g_bench, sizeof(g_bench), &n) == FR_OK && n) {
+            const int16_t* x = (const int16_t*)g_bench;
+            for (uint32_t j = 0; j < n / 2 && k < s->frames; ++j, ++k)
+                bad += x[j] != d[k];
+        }
+        f_close(&f);
+        ++checked;
+        if (bad) {
+            ++bad_samples;
+            printf("  %s: %lu of %lu frames differ\n", s->name, (unsigned long)bad, (unsigned long)s->frames);
+        }
+    }
+    printf("verify: %d samples checked, %d differ\n", checked, bad_samples);
 }
 
 int samples_read_file(const char* path, char* buf, int n) {
@@ -1157,8 +1249,8 @@ static int analyse_new(int l) {
             printf("SD: cannot open %s\n", path);
             continue;
         }
-        const int normalized = g_normalize && s->peak > 0 && s->peak < 32767;
-        const int32_t gain = normalized ? (int32_t)((32767u << 16) / (uint32_t)s->peak) : 65536;
+        const int32_t gain = load_gain(s);
+        const int normalized = gain != 65536;
         uint32_t done = 0, got;
         while (done < s->frames && (got = read_chunk(&f, s, d, done, gain)) != 0)
             done += got;

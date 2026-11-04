@@ -108,7 +108,7 @@ static int name_eq(const char* a, const char* b) { /* case-insensitive */
 static void help(void) {
     puts("status | list [lib [bank]] | pool | rescan | bank <slot> <n> | buf <slot> <n> | bpm <x>\n"
          "trig <slot> [pos] | note <slot> <note> [vel] | set <slot> <param> <value> | gatetest <slot>\n"
-         "dsm <0|1> | norm <0|1> | verbose <0|1> | reset\n"
+         "dsm <0|1> | norm <0|1> | verbose <0|1> (loads: where the time goes) | prof (main loop: time per task) | reset\n"
          "usb | usbdesc | midimon <0|1|2 raw|3 raw+clocks> | usbpull <0 pull-downs|1 released> | clock <0|1> (follow MIDI clock)\n"
          "rev [<control> <0..127>] (plate reverb: size decay damp diffusion wander return glide spread glideMode send0..2)\n"
          "esp [sim <0|1>] (link to the ESP32 cutter; sim: the PC stands in on this console) | cutter <0|1> (voice 0 played by the cutter / MIDI)\n"
@@ -124,6 +124,8 @@ static void apply_all(void) {
         slot_apply(s);
     set_global_bpm(g_bpm_milli);
 }
+
+static void prof(void);
 
 static void shell_line(char* line) {
     char* argv[6];
@@ -141,6 +143,8 @@ static void shell_line(char* line) {
     else if (!strcmp(c, "bank") && argc > 2) slot_select_bank(atoi(argv[1]), atoi(argv[2]));
     else if (!strcmp(c, "pool")) samples_stats();
     else if (!strcmp(c, "sdbench")) samples_sdbench();
+    else if (!strcmp(c, "verify") && argc > 2) { void samples_verify(int, int); samples_verify(atoi(argv[1]), atoi(argv[2])); }
+    else if (!strcmp(c, "prof")) prof();
     else if (!strcmp(c, "gatetest") && argc > 1) {
         /* trigger, then time the gate (open -> ramp-down starts) in engine samples */
         const int s = atoi(argv[1]);
@@ -170,6 +174,7 @@ static void shell_line(char* line) {
     else if (!strcmp(c, "mmput") && argc > 1) mapping_midimap_put(argv[1], argc > 2 ? argv[2] : NULL);
     else if (!strcmp(c, "rev") && argc > 2) { reverb_knob(rk_of(argv[1]), atoi(argv[2])); reverb_status(); }
     else if (!strcmp(c, "rev")) reverb_status();
+    else if (!strcmp(c, "revbench")) { void reverb_bench(void); reverb_bench(); }
     else if (!strcmp(c, "esp") && argc > 2 && !strcmp(argv[1], "sim")) esplink_set_sim(atoi(argv[2]));
     else if (!strcmp(c, "esp")) esplink_status();
     else if (!strcmp(c, "cutter") && argc > 1) mapping_set_cutter(atoi(argv[1]));
@@ -289,16 +294,44 @@ static void io_drain(void) {
     esplink_drain();
 }
 
-/* samples_idle_hook: called by the loader between slices of work */
-static void console_pump(void) {
-    console_drain();
-    usbh_poll(); /* MIDI keeps flowing while banks load */
-    reverb_service();
+/* `prof`: where the main loop's time goes, per task, and inside the loader's breaks (engine
+   samples; sums of 20.8 us ticks, unbiased over many calls) */
+enum { PF_CONSOLE, PF_ESP, PF_REVERB, PF_USB, PF_LOADER, PF_SLOTS, PF_B_CONSOLE, PF_B_USB, PF_B_REVERB, PF_B_ROUTE, PF_N };
+static const char* const g_pf_name[PF_N] = {"console",       "esp link",   "reverb",         "usb",
+                                            "loader",        "slots",      " break console", " break usb",
+                                            " break reverb", " break route"};
+static uint32_t g_pf[PF_N], g_pf_since;
+#define PF(k, call)                                          \
+    do {                                                     \
+        const uint32_t t_ = eng_status(SMP_SG_SAMPLES);       \
+        call;                                                \
+        g_pf[k] += eng_status(SMP_SG_SAMPLES) - t_;           \
+    } while (0)
+
+static void prof(void) {
+    const uint32_t all = eng_status(SMP_SG_SAMPLES) - g_pf_since;
+    printf("prof: %lu ms (breaks are inside the loader)\n", (unsigned long)(all / 48));
+    for (int k = 0; k < PF_N; ++k)
+        printf("  %-14s %6lu ms %3lu%%\n", g_pf_name[k], (unsigned long)(g_pf[k] / 48),
+               (unsigned long)(all ? (uint64_t)g_pf[k] * 100 / all : 0));
+    memset(g_pf, 0, sizeof(g_pf));
+    g_pf_since = eng_status(SMP_SG_SAMPLES);
+}
+
+static void route_pending(int from_loader) {
     while (g_cin_r != g_cin_w) {
         const uint8_t c = g_cin[g_cin_r];
         g_cin_r = (g_cin_r + 1) & (sizeof(g_cin) - 1);
-        route_byte(c, 1);
+        route_byte(c, from_loader);
     }
+}
+
+/* samples_idle_hook: called by the loader between slices of work */
+static void console_pump(void) {
+    PF(PF_B_CONSOLE, console_drain());
+    PF(PF_B_USB, usbh_poll()); /* MIDI keeps flowing while banks load */
+    PF(PF_B_REVERB, reverb_service());
+    PF(PF_B_ROUTE, route_pending(1));
 }
 
 
@@ -348,23 +381,22 @@ int main(void) {
     usbh_init();
     samples_idle_hook = console_pump;  /* loader slices: dispatch events */
     samples_drain_hook = io_drain;      /* inside SD reads: buffer only */
+    g_pf_since = eng_status(SMP_SG_SAMPLES);
     for (;;) {
-        console_drain();
-        while (g_text_r != g_text_w) {
-            const uint8_t c = g_text[g_text_r];
-            g_text_r = (g_text_r + 1) & (sizeof(g_text) - 1);
-            text_byte(c);
-        }
-        while (g_cin_r != g_cin_w) {
-            const uint8_t c = g_cin[g_cin_r];
-            g_cin_r = (g_cin_r + 1) & (sizeof(g_cin) - 1);
-            route_byte(c, 0);
-        }
-        esplink_poll();
-        reverb_service();
-        usbh_poll();
-        samples_poll();
-        slots_service();
+        PF(PF_CONSOLE, {
+            console_drain();
+            while (g_text_r != g_text_w) {
+                const uint8_t c = g_text[g_text_r];
+                g_text_r = (g_text_r + 1) & (sizeof(g_text) - 1);
+                text_byte(c);
+            }
+            route_pending(0);
+        });
+        PF(PF_ESP, esplink_poll());
+        PF(PF_REVERB, reverb_service());
+        PF(PF_USB, usbh_poll());
+        PF(PF_LOADER, samples_poll());
+        PF(PF_SLOTS, slots_service());
     }
     return 0;
 }
