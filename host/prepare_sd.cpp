@@ -459,7 +459,7 @@ static void do_lib(const fs::path& dir, bool write, Totals& tot) {
     }
     {
         FILE* f = std::fopen((dir / ".smptr").c_str(), "wb");
-        const TrfHdr h{0x4E525453u, 1, ntrf, sizeof(TrfRec)};
+        const TrfHdr h{0x4E525453u, 2, ntrf, sizeof(TrfRec)}; // TRF_VERSION in fw/samples.c
         std::fwrite(&h, sizeof(h), 1, f);
         std::fwrite(trf.data(), 1, trf.size(), f);
         std::fclose(f);

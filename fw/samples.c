@@ -566,7 +566,7 @@ static uint32_t g_tr_pool[TR_POOL];
 static uint32_t g_tr_used;
 static int g_tr_dirty[MAX_LIBS];
 #define TRF_MAGIC 0x4E525453u /* 'STRN' */
-#define TRF_VERSION 1
+#define TRF_VERSION 2 /* 2: at most one transient per 1/64 of the sample (version 1 files are analysed again) */
 struct trf_hdr { uint32_t magic, version, count, rec_size; };
 /* peak: of the 16-bit copy (0 in older files); the only place the peak of a part is kept */
 struct trf_rec { uint32_t fsize; uint16_t fdate, ftime; uint32_t hash; uint8_t n, pad; int16_t peak; };

@@ -96,27 +96,19 @@ int tr_analyse(tr_get_fn get, void* ctx, uint32_t frames, uint32_t* pos, void (*
         last = b;
         have_last = 1;
     }
-    /* level filter, then the TR_MAX strongest */
+    /* level filter */
     int n = 0;
     for (int k = 0; k < nc; ++k)
         if (c[k].level >= lmax - TR_RANGE)
             c[n++] = c[k];
-    while (n > TR_MAX) {
-        int w = 0;
-        for (int k = 1; k < n; ++k)
-            if (c[k].rise < c[w].rise)
-                w = k;
-        for (int k = w; k < n - 1; ++k)
-            c[k] = c[k + 1];
-        --n;
-    }
     int out = 0;
     /* the start counts when it begins loud (most loops start on a hit) */
     if (l0 >= lmax - TR_RANGE && (n == 0 || c[0].block > TR_REFRACT))
         pos[out++] = 0;
+    /* the first onset of each 1/TR_BINS of the sample */
     for (int k = 0; k < n && out < TR_MAX; ++k) {
         const uint32_t p = refine(get, ctx, frames, c[k].block);
-        if (out == 0 || p > pos[out - 1])
+        if (out == 0 || ((uint64_t)p * TR_BINS) / frames > ((uint64_t)pos[out - 1] * TR_BINS) / frames)
             pos[out++] = p;
     }
     return out;

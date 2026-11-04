@@ -6,14 +6,17 @@
  * 64-sample block, Mitchell log2; an onset is a rise of TR_RISE over the minimum of the
  * previous three blocks (~4 ms), at most one per TR_REFRACT blocks (the strongest), and
  * within TR_RANGE of the loudest block. Each onset is placed just before the attack: the
- * first sample reaching a quarter of the block peak, moved back to a zero crossing.
+ * first sample reaching a quarter of the block peak, moved back to a zero crossing. At most
+ * one onset per 1/TR_BINS of the sample, the first: dense files keep positions spread over
+ * the whole file instead of clusters that sound alike.
  */
 #ifndef TRANSIENTS_H
 #define TRANSIENTS_H
 
 #include <stdint.h>
 
-#define TR_MAX      64          /* transients per sample (a 4-bar break has 40-60)     */
+#define TR_MAX      64          /* transients per sample                               */
+#define TR_BINS     64          /* at most one per 1/TR_BINS of the sample (<= TR_MAX) */
 #define TR_BLOCK    64          /* analysis block (samples)                            */
 #define TR_RISE     384         /* log2 Q8: 1.5 octaves (~9 dB) rise                   */
 #define TR_REFRACT  24          /* blocks (~35 ms at 44.1 kHz) between onsets          */
