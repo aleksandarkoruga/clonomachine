@@ -34,6 +34,7 @@ struct sample {
     char     name[SAMPLE_NAME_LEN];    /* relative to the library folder ("sub/x.wav") */
     uint32_t fsize;
     uint16_t fdate, ftime;
+    uint32_t sclust;                   /* start cluster, from the boot's folder listing   */
     uint32_t data_off, data_len, sr;   /* of this sample (a part: its stretch of the file) */
     uint8_t  ch, bits, ready, fmt;     /* fmt: WAV_PCM / WAV_FLOAT                        */
     uint32_t frames;

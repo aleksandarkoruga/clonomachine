@@ -585,6 +585,7 @@ static void add_dir_wavs(struct lib* L, const char* dir, const char* prefix) {
         s->fsize = (uint32_t)fi.fsize;
         s->fdate = fi.fdate;
         s->ftime = fi.ftime;
+        s->sclust = fi.fclust;
     }
     f_closedir(&dj);
 }
@@ -903,6 +904,45 @@ static void drop_req(int k) {
     --g_nreq;
 }
 
+/* ---- opening a sample's file ----------------------------------------------------------
+ * By its start cluster from the boot's folder listing (f_open_clust: no directory search, the
+ * listing is redone at every boot and rescan), by name only if that fails (exFAT). A split
+ * file gets a cluster link map on its first part's load (FatFs fast seek): every part then
+ * seeks, and reads across clusters, without walking the file's chain in the FAT. */
+#define CLMT_FILES 32
+#define CLMT_WORDS 64 /* 31 fragments; a file in more pieces seeks the slow way */
+static DWORD g_clmt[CLMT_FILES][CLMT_WORDS];
+static uint32_t g_clmt_of[CLMT_FILES]; /* start cluster of the file a map is for, 0: free */
+static int g_clmt_next;
+
+static DWORD* link_map(FIL* f) {
+    const uint32_t sc = f->obj.sclust;
+    for (int i = 0; i < CLMT_FILES; ++i)
+        if (g_clmt_of[i] == sc)
+            return g_clmt[i][0] ? g_clmt[i] : 0; /* [0] 0: too many pieces */
+    const int i = g_clmt_next;
+    g_clmt_next = (g_clmt_next + 1) % CLMT_FILES;
+    g_clmt_of[i] = sc;
+    g_clmt[i][0] = CLMT_WORDS;
+    f->cltbl = g_clmt[i];
+    if (f_lseek(f, CREATE_LINKMAP) != FR_OK)
+        g_clmt[i][0] = 0;
+    return g_clmt[i][0] ? g_clmt[i] : 0;
+}
+
+/* Opens s's file at its data (a part: its stretch). Returns 1 on success. */
+static int open_sample(FIL* f, int lib, const struct sample* s) {
+    if (!s->sclust || f_open_clust(f, s->sclust, s->fsize) != FR_OK) {
+        char path[SAMPLE_NAME_LEN + 16];
+        path_of(path, sizeof(path), lib, s->name);
+        if (f_open(f, path, FA_READ) != FR_OK)
+            return 0;
+    }
+    if (s->nseg > 1 && f->obj.sclust)
+        f->cltbl = link_map(f);
+    return f_lseek(f, s->data_off) == FR_OK;
+}
+
 /* Picks the next file to load. Returns 1 if a job started. */
 static int job_start(void) {
     for (;;) {
@@ -953,7 +993,7 @@ static int job_start(void) {
         g_t_open = g_t_read = g_t_copy = g_t_hook = g_t_fin = 0;
         g_sd_time = g_sd_calls = 0;
         const uint32_t to = now_samples();
-        const int opened = f_open(&g_job.f, path, FA_READ) == FR_OK && f_lseek(&g_job.f, s->data_off) == FR_OK;
+        const int opened = open_sample(&g_job.f, r.lib, s);
         g_t_open = now_samples() - to;
         if (!opened) {
             printf("SD: cannot open %s\n", path);
@@ -1184,11 +1224,9 @@ void samples_verify(int lib, int bank) {
         const struct sample* s = &g_libs[lib].s[b->first + i];
         if (!s->ready || s->fmt != WAV_PCM || s->ch != 1 || s->bits != 16 || load_gain(s) != 65536)
             continue;
-        char path[SAMPLE_NAME_LEN + 16];
         FIL f;
         UINT n;
-        path_of(path, sizeof(path), lib, s->name);
-        if (f_open(&f, path, FA_READ) != FR_OK || f_lseek(&f, s->data_off) != FR_OK)
+        if (!open_sample(&f, lib, s))
             continue;
         const volatile int16_t* d = g_mem + b->base + s->offset + SMP_PREPAD;
         uint32_t bad = 0, k = 0;
@@ -1245,7 +1283,7 @@ static int analyse_new(int l) {
         path_of(path, sizeof(path), l, s->name);
         if (s->seg == 0)
             printf("SD: analysing %s%s\n", path, s->nseg > 1 ? " (parts)" : "");
-        if (f_open(&f, path, FA_READ) != FR_OK || f_lseek(&f, s->data_off) != FR_OK) {
+        if (!open_sample(&f, l, s)) {
             printf("SD: cannot open %s\n", path);
             continue;
         }
@@ -1286,6 +1324,8 @@ int samples_init(void) {
     }
     g_tr_used = 0;
     g_nreq = 0;
+    memset(g_clmt_of, 0, sizeof(g_clmt_of)); /* the link maps belong to the listing being redone */
+    g_clmt_next = 0;
     memset(g_libs, 0, sizeof(g_libs));
     for (int l = 0; l < MAX_LIBS; ++l) {
         g_libs[l].s = g_store[l];

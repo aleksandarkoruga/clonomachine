@@ -2689,6 +2689,7 @@ static void get_fileinfo (
 
 
 	fno->fname[0] = 0;			/* Invaidate file info */
+	fno->fclust = 0;
 	if (dp->sect == 0) return;	/* Exit if read pointer has reached end of directory */
 
 #if FF_USE_LFN		/* LFN configuration */
@@ -2766,6 +2767,7 @@ static void get_fileinfo (
 
 	fno->fattrib = dp->dir[DIR_Attr];					/* Attribute */
 	fno->fsize = ld_dword(dp->dir + DIR_FileSize);		/* Size */
+	fno->fclust = ld_clust(dp->obj.fs, dp->dir);		/* Start cluster (sampler: f_open_clust) */
 	fno->ftime = ld_word(dp->dir + DIR_ModTime + 0);	/* Time */
 	fno->fdate = ld_word(dp->dir + DIR_ModTime + 2);	/* Date */
 }
@@ -3874,6 +3876,50 @@ FRESULT f_open (
 	LEAVE_FF(fs, res);
 }
 
+
+
+
+/*-----------------------------------------------------------------------*/
+/* Open a File for reading by its start cluster (sampler addition)       */
+/*-----------------------------------------------------------------------*/
+/* The sampler lists its folders once at boot (FILINFO.fclust), so a load
+   skips the directory search of f_open. FAT/FAT32 only: on exFAT the
+   allocation info lives in the directory entry, the caller uses f_open. */
+
+FRESULT f_open_clust (
+	FIL* fp,			/* Pointer to the blank file object */
+	DWORD sclust,		/* Start cluster from the directory entry */
+	FSIZE_t size		/* File size from the directory entry */
+)
+{
+	FRESULT res;
+	FATFS *fs;
+	const TCHAR *path = "";
+
+	if (!fp) return FR_INVALID_OBJECT;
+	res = mount_volume(&path, &fs, FA_READ);
+	if (res != FR_OK) return res;
+#if FF_FS_EXFAT
+	if (fs->fs_type == FS_EXFAT) return FR_INVALID_OBJECT;
+#endif
+	if (sclust < 2 || sclust >= fs->n_fatent) return FR_INVALID_OBJECT;
+	fp->obj.sclust = sclust;
+	fp->obj.objsize = size;
+#if FF_USE_FASTSEEK
+	fp->cltbl = 0;
+#endif
+	fp->obj.fs = fs;
+	fp->obj.id = fs->id;
+	fp->flag = FA_READ;
+	fp->err = 0;
+	fp->sect = 0;
+	fp->fptr = 0;
+#if !FF_FS_READONLY
+	fp->dir_sect = 0;
+	fp->dir_ptr = 0;
+#endif
+	return FR_OK;
+}
 
 
 

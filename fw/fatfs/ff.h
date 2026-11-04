@@ -246,6 +246,7 @@ typedef struct {
 
 typedef struct {
 	FSIZE_t	fsize;			/* File size */
+	DWORD	fclust;			/* Start cluster (FAT/FAT32, 0 on exFAT): f_open_clust (sampler) */
 	WORD	fdate;			/* Modified date */
 	WORD	ftime;			/* Modified time */
 	BYTE	fattrib;		/* File attribute */
@@ -302,6 +303,7 @@ typedef enum {
 /* FatFs module application interface                           */
 
 FRESULT f_open (FIL* fp, const TCHAR* path, BYTE mode);				/* Open or create a file */
+FRESULT f_open_clust (FIL* fp, DWORD sclust, FSIZE_t size);			/* Open a file for reading by its start cluster (sampler) */
 FRESULT f_close (FIL* fp);											/* Close an open file object */
 FRESULT f_read (FIL* fp, void* buff, UINT btr, UINT* br);			/* Read data from the file */
 FRESULT f_write (FIL* fp, const void* buff, UINT btw, UINT* bw);	/* Write data to the file */
