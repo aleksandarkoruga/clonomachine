@@ -9,23 +9,35 @@
 // tail beat), stored in the index; everything else keeps the length-based tempo.
 // The records carry date/time 0: the board matches them by name and size and rewrites them
 // with the card's real timestamps.
+// Loudness (host/loudness.cpp): files below their folder's target (LUFS) are raised to it,
+// with a 3-band compressor and a look-ahead limiter making the room, and keep a full-scale
+// peak; louder files stay as they are. A levelled file carries a small 'lvl ' chunk after its
+// audio (loudness before / after, target), so later runs leave it alone.
 //
-//   g++ -O2 -std=c++17 -Ifw -Iinclude host/prepare_sd.cpp fw/wavutil.c fw/transients.c -o prepare_sd
+//   g++ -O2 -std=c++17 -Ifw -Iinclude host/prepare_sd.cpp host/loudness.cpp fw/wavutil.c fw/transients.c -o prepare_sd
 //   ./prepare_sd /run/media/$USER/CARD            # report only
 //   ./prepare_sd /run/media/$USER/CARD --write    # convert in place + write the caches
 //   ./prepare_sd CARD --csv table.csv             # also: one line per sample (length, bpm, transients)
 //   ./prepare_sd CARD --only melody --write       # one folder only, the others are not touched
+//   ./prepare_sd CARD --target drums=-11          # loudness target of a folder (LUFS)
+//   ./prepare_sd CARD --max-boost 9 --limit 3     # most a file comes up / the limiter takes (dB)
+//   ./prepare_sd CARD --no-loudness               # convert and analyse only
 //
-// Files that are already mono 16-bit with full-scale peaks are left as they are. Formats the
-// firmware can't read (e.g. ADPCM) are left alone and get no records.
+// Files that are already mono 16-bit with full-scale peaks (and loud enough, or levelled
+// before) are left as they are. Formats the firmware can't read (e.g. ADPCM) are left alone
+// and get no records.
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include "loudness.h"
 
 extern "C" {
 #include "transients.h"
@@ -145,7 +157,25 @@ static bool convert(const fs::path& p, const Wav& w, std::vector<int16_t>& out) 
     return true;
 }
 
-static bool write_wav(const fs::path& p, uint32_t sr, const std::vector<int16_t>& x) {
+// after the audio of a levelled file (the firmware reads only up to the data chunk)
+#pragma pack(push, 1)
+struct LvlChunk { char id[4]; uint32_t len; char tag[4]; float before, after, target; };
+#pragma pack(pop)
+static_assert(sizeof(LvlChunk) == 24, "lvl chunk layout");
+
+static bool read_lvl(const fs::path& p, const Wav& w, uint64_t fsize, LvlChunk& m) {
+    const uint64_t off = uint64_t(w.data_off) + w.data_len + (w.data_len & 1);
+    if (off + sizeof(m) > fsize)
+        return false;
+    FILE* f = std::fopen(p.c_str(), "rb");
+    if (!f)
+        return false;
+    const bool got = std::fseek(f, long(off), SEEK_SET) == 0 && std::fread(&m, sizeof(m), 1, f) == 1;
+    std::fclose(f);
+    return got && !std::memcmp(m.id, "lvl ", 4) && m.len == 16 && !std::memcmp(m.tag, "psd1", 4);
+}
+
+static bool write_wav(const fs::path& p, uint32_t sr, const std::vector<int16_t>& x, const LvlChunk* lvl) {
     const fs::path tmp = p.string() + ".prep_tmp";
     FILE* f = std::fopen(tmp.c_str(), "wb");
     if (!f)
@@ -154,10 +184,11 @@ static bool write_wav(const fs::path& p, uint32_t sr, const std::vector<int16_t>
     uint8_t h[44];
     auto put32 = [&](int o, uint32_t v) { h[o] = uint8_t(v); h[o + 1] = uint8_t(v >> 8); h[o + 2] = uint8_t(v >> 16); h[o + 3] = uint8_t(v >> 24); };
     auto put16 = [&](int o, uint16_t v) { h[o] = uint8_t(v); h[o + 1] = uint8_t(v >> 8); };
-    std::memcpy(h, "RIFF", 4); put32(4, 36 + data); std::memcpy(h + 8, "WAVEfmt ", 8); put32(16, 16);
+    std::memcpy(h, "RIFF", 4); put32(4, 36 + data + (lvl ? uint32_t(sizeof(*lvl)) : 0)); std::memcpy(h + 8, "WAVEfmt ", 8); put32(16, 16);
     put16(20, 1); put16(22, 1); put32(24, sr); put32(28, sr * 2); put16(32, 2); put16(34, 16);
     std::memcpy(h + 36, "data", 4); put32(40, data);
-    const bool ok = std::fwrite(h, 1, 44, f) == 44 && std::fwrite(x.data(), 2, x.size(), f) == x.size();
+    const bool ok = std::fwrite(h, 1, 44, f) == 44 && std::fwrite(x.data(), 2, x.size(), f) == x.size() &&
+                    (!lvl || std::fwrite(lvl, sizeof(*lvl), 1, f) == 1);
     if (std::fclose(f) != 0 || !ok) {
         fs::remove(tmp);
         return false;
@@ -306,8 +337,81 @@ static LoopTempo loop_tempo(const std::string& name, uint32_t frames, uint32_t s
 
 static int16_t get16(void* ctx, uint32_t i) { return (*static_cast<std::vector<int16_t>*>(ctx))[i]; }
 
-struct Totals { uint64_t before = 0, after = 0; int files = 0, converted = 0, samples = 0, skipped = 0, tempos = 0; };
+struct Totals { uint64_t before = 0, after = 0; int files = 0, converted = 0, samples = 0, skipped = 0, tempos = 0, levelled = 0; };
 static FILE* g_csv;
+static bool g_loudness = true;
+static LevelParams g_lp;
+static std::vector<std::pair<std::string, double>> g_targets = {
+    {"drums", -12}, {"melody", -16}, {"bass", -14}, {"kick", -12}};
+
+static double target_of(const std::string& lib) {
+    for (const auto& t : g_targets)
+        if (t.first == lib)
+            return t.second;
+    return -14;
+}
+
+// one file read, converted and levelled (on a worker thread)
+struct Prep {
+    bool parsed = false, ok = false, native = false, rewrite = false, marked = false;
+    uint64_t fsize0 = 0;
+    Wav w;
+    std::vector<int16_t> x;
+    LvlChunk mk{};
+    LevelResult lr;
+    double target = 0;
+};
+
+static void prepare(const fs::path& p, const std::string& lib, Prep& P) {
+    P.fsize0 = fs::file_size(p);
+    if (!parse_wav(p, P.w, P.fsize0))
+        return;
+    P.parsed = true;
+    const Wav& w = P.w;
+    std::vector<int16_t>& x = P.x;
+    if (!convert(p, w, x))
+        return;
+    P.ok = true;
+    P.native = w.fmt == WAV_PCM && w.ch == 1 && w.bits == 16 && w.data_off == 44 && w.data_len == w.frames * 2;
+    P.rewrite = !P.native;
+    if (P.native) { /* already mono 16-bit: rewrite only if it isn't normalised */
+        std::vector<int16_t> orig(w.frames);
+        FILE* f = std::fopen(p.c_str(), "rb");
+        std::fseek(f, 44, SEEK_SET);
+        const size_t got = std::fread(orig.data(), 2, orig.size(), f);
+        std::fclose(f);
+        int16_t pk0 = 0;
+        for (size_t i = 0; i < got; ++i)
+            pk0 = std::max<int16_t>(pk0, orig[i] == -32768 ? 32767 : int16_t(std::abs(orig[i])));
+        P.rewrite = pk0 < 32767;
+        if (!P.rewrite)
+            x.swap(orig);
+        P.marked = read_lvl(p, w, P.fsize0, P.mk);
+    }
+    std::vector<float> f(x.size());
+    for (size_t i = 0; i < x.size(); ++i)
+        f[i] = x[i] / 32767.0f;
+    LevelParams lp = g_lp;
+    lp.target = P.target = target_of(lib);
+    if (!g_loudness || P.marked) {
+        P.lr.before = P.lr.after = lufs(f.data(), f.size(), w.sr);
+        if (P.marked)
+            P.lr.before = P.mk.before;
+        return;
+    }
+    P.lr = level(f, w.sr, lp);
+    if (P.lr.changed) {
+        for (size_t i = 0; i < x.size(); ++i)
+            x[i] = int16_t(std::lrint(std::clamp(f[i] * 32767.0, -32768.0, 32767.0)));
+        P.rewrite = true;
+    }
+}
+
+static std::string lu(double v) {
+    char b[16];
+    std::snprintf(b, sizeof(b), std::isfinite(v) ? "%.1f" : "-inf", v);
+    return b;
+}
 
 static void do_lib(const fs::path& dir, bool write, Totals& tot) {
     std::vector<std::string> names;
@@ -328,56 +432,69 @@ static void do_lib(const fs::path& dir, bool write, Totals& tot) {
                 names.end());
     std::sort(names.begin(), names.end(), name_order);
 
+    const std::string lib = dir.filename().string();
+    std::vector<Prep> prep(names.size());
+    { /* read, convert and level in parallel (the leveller's search is the slow part) */
+        std::atomic<size_t> next{0};
+        std::vector<std::thread> th;
+        const unsigned nt = std::max(1u, std::min(8u, std::thread::hardware_concurrency()));
+        for (unsigned k = 0; k < nt; ++k)
+            th.emplace_back([&] {
+                for (size_t i; (i = next++) < names.size();)
+                    prepare(dir / names[i], lib, prep[i]);
+            });
+        for (auto& t : th)
+            t.join();
+    }
+
     std::vector<IdxRec> idx;
     std::vector<uint8_t> trf; // records + positions
     uint32_t ntrf = 0;
-    for (const std::string& name : names) {
+    struct Loud { double v; std::string name; };
+    std::vector<Loud> l_before, l_after;
+    int n_raised = 0, n_capped = 0, n_marked = 0;
+    for (size_t fi = 0; fi < names.size(); ++fi) {
+        const std::string& name = names[fi];
         const fs::path p = dir / name;
-        const uint64_t fsize0 = fs::file_size(p);
-        Wav w;
-        if (!parse_wav(p, w, fsize0)) {
+        Prep& P = prep[fi];
+        if (!P.parsed) {
             std::printf("  skip %s (not a supported WAV)\n", name.c_str());
             ++tot.skipped;
             continue;
         }
+        const uint64_t fsize0 = P.fsize0;
+        const Wav& w = P.w;
         ++tot.files;
         tot.before += fsize0;
-        std::vector<int16_t> x;
-        if (!convert(p, w, x)) {
+        if (!P.ok) {
             std::printf("  skip %s (read error)\n", name.c_str());
             ++tot.skipped;
             continue;
         }
+        std::vector<int16_t>& x = P.x;
+        const bool native = P.native, rewrite = P.rewrite, levelled = P.lr.changed;
         int16_t peak = 0;
         for (int16_t v : x)
             peak = std::max<int16_t>(peak, v == -32768 ? 32767 : int16_t(std::abs(v)));
-        const bool native = w.fmt == WAV_PCM && w.ch == 1 && w.bits == 16 && w.data_off == 44 &&
-                            w.data_len == w.frames * 2;
-        bool rewrite = !native;
-        if (native) { /* already mono 16-bit: rewrite only if it isn't normalised */
-            Wav w2 = w;
-            std::vector<int16_t> orig(w.frames);
-            FILE* f = std::fopen(p.c_str(), "rb");
-            std::fseek(f, 44, SEEK_SET);
-            const size_t got = std::fread(orig.data(), 2, orig.size(), f);
-            std::fclose(f);
-            int16_t pk0 = 0;
-            for (size_t i = 0; i < got; ++i)
-                pk0 = std::max<int16_t>(pk0, orig[i] == -32768 ? 32767 : int16_t(std::abs(orig[i])));
-            rewrite = pk0 < 32767;
-            if (!rewrite)
-                x.swap(orig);
-            (void)w2;
-        }
+        LvlChunk mk{{'l', 'v', 'l', ' '}, 16, {'p', 's', 'd', '1'}, float(P.lr.before), float(P.lr.after), float(P.target)};
         if (rewrite) {
             ++tot.converted;
-            if (write && !write_wav(p, w.sr, x)) {
+            if (write && !write_wav(p, w.sr, x, levelled ? &mk : nullptr)) {
                 std::printf("  FAILED to write %s\n", name.c_str());
                 continue;
             }
         }
+        if (std::isfinite(P.lr.before))
+            l_before.push_back({P.lr.before, name});
+        if (std::isfinite(P.lr.after))
+            l_after.push_back({P.lr.after, name});
+        n_raised += levelled;
+        n_capped += levelled && P.lr.capped;
+        n_marked += P.marked;
+        tot.levelled += levelled;
         /* a file left as it is keeps its size (some carry chunks after the audio data) */
-        const uint32_t F = w.frames, fsize = rewrite ? 44 + F * 2 : uint32_t(fsize0);
+        const uint32_t F = w.frames,
+                       fsize = rewrite ? 44 + F * 2 + (levelled ? uint32_t(sizeof(mk)) : 0) : uint32_t(fsize0);
         tot.after += fsize;
         const uint32_t len = wav_split_len(F, w.sr, name.c_str(), kMaxFrames);
         const uint32_t parts = len ? wav_split_count(F, len) : 1;
@@ -440,11 +557,36 @@ static void do_lib(const fs::path& dir, bool write, Totals& tot) {
             ++ntrf;
             ++tot.samples;
         }
-        std::printf("  %-50s %s %5.1f s %s%s%s\n", name.c_str(), rewrite ? (native ? "normalise" : "convert  ") : "ok       ",
-                    double(F) / w.sr, parts > 1 ? (std::to_string(parts) + " parts").c_str() : "",
+        std::string loud = std::isfinite(P.lr.before) ? "  " + lu(P.lr.before) + " LUFS" : "  silent";
+        if (levelled) {
+            char b[96];
+            char c[40] = "no comp";
+            if (P.lr.depth > 0)
+                std::snprintf(c, sizeof(c), "comp %.1f from -%.0f", P.lr.comp, P.lr.depth);
+            std::snprintf(b, sizeof(b), " -> %s (+%.1f dB, %s, limit %.1f%s)", lu(P.lr.after).c_str(), P.lr.boost, c, P.lr.limit,
+                          P.lr.capped ? ", capped" : "");
+            loud += b;
+        } else if (P.marked)
+            loud += " -> " + lu(P.lr.after) + " (levelled before)";
+        std::printf("  %-50s %s %5.1f s%s %s%s%s\n", name.c_str(),
+                    levelled ? "level    " : rewrite ? (native ? "normalise" : "convert  ") : "ok       ", double(F) / w.sr,
+                    loud.c_str(), parts > 1 ? (std::to_string(parts) + " parts").c_str() : "",
                     rewrite ? (" (" + std::to_string(fsize0 / 1024) + " -> " + std::to_string(fsize / 1024) + " KB)").c_str() : "",
                     tempo_note.c_str());
     }
+    auto span = [](std::vector<Loud>& v, const char* what) {
+        if (v.empty())
+            return;
+        std::sort(v.begin(), v.end(), [](const Loud& a, const Loud& b) { return a.v < b.v; });
+        std::printf("  loudness %-7s lowest %6.1f LUFS (%s), 10 %% below %.1f, median %.1f, 10 %% above %.1f, highest %.1f (%s)\n",
+                    what, v.front().v, v.front().name.c_str(), v[v.size() / 10].v, v[v.size() / 2].v, v[v.size() * 9 / 10].v,
+                    v.back().v, v.back().name.c_str());
+    };
+    std::printf("  ---- /%s: target %.1f LUFS, %d raised (%d capped), %d levelled before\n", lib.c_str(), target_of(lib),
+                n_raised, n_capped, n_marked);
+    span(l_before, "before:");
+    if (g_loudness)
+        span(l_after, "after:");
     if (!write)
         return;
     {
@@ -465,7 +607,8 @@ static void do_lib(const fs::path& dir, bool write, Totals& tot) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::printf("usage: %s <card mount point> [--write] [--csv file] [--only folder]\n", argv[0]);
+        std::printf("usage: %s <card mount point> [--write] [--csv file] [--only folder] [--target folder=LUFS]\n"
+                    "       [--max-boost dB] [--limit dB] [--no-loudness]\n", argv[0]);
         return 1;
     }
     const fs::path root = argv[1];
@@ -478,6 +621,28 @@ int main(int argc, char** argv) {
             g_csv = std::fopen(argv[++i], "w");
         else if (!std::strcmp(argv[i], "--only") && i + 1 < argc)
             only = argv[++i];
+        else if (!std::strcmp(argv[i], "--no-loudness"))
+            g_loudness = false;
+        else if (!std::strcmp(argv[i], "--max-boost") && i + 1 < argc)
+            g_lp.max_boost = std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--limit") && i + 1 < argc)
+            g_lp.lim_max = std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--target") && i + 1 < argc) {
+            const std::string a = argv[++i];
+            const size_t eq = a.find('=');
+            if (eq == std::string::npos) {
+                std::printf("--target wants folder=LUFS, e.g. drums=-12\n");
+                return 1;
+            }
+            const std::string lib = a.substr(0, eq);
+            const double v = std::atof(a.c_str() + eq + 1);
+            bool set = false;
+            for (auto& t : g_targets)
+                if (t.first == lib)
+                    t.second = v, set = true;
+            if (!set)
+                g_targets.push_back({lib, v});
+        }
     }
     Totals tot;
     for (const char* lib : kLibs) {
@@ -489,9 +654,10 @@ int main(int argc, char** argv) {
     }
     if (g_csv)
         std::fclose(g_csv);
-    std::printf("\n%d WAVs (%d to convert or normalise, %d skipped) -> %d samples analysed, %d drum loops get a tempo "
-                "for a whole number of beats; %.0f MB -> %.0f MB%s\n",
-                tot.files, tot.converted, tot.skipped, tot.samples, tot.tempos, tot.before / 1048576.0, tot.after / 1048576.0,
+    std::printf("\n%d WAVs (%d to convert, normalise or level, %d of them levelled; %d skipped) -> %d samples analysed, %d drum "
+                "loops get a tempo for a whole number of beats; %.0f MB -> %.0f MB%s\n",
+                tot.files, tot.converted, tot.levelled, tot.skipped, tot.samples, tot.tempos, tot.before / 1048576.0,
+                tot.after / 1048576.0,
                 write ? "" : "   (report only: run again with --write)");
     return 0;
 }

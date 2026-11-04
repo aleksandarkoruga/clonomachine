@@ -7,6 +7,8 @@
 #   host/prepare_sd.sh /run/media/$USER/FPGA --write            # backup, convert, write caches
 #   host/prepare_sd.sh /run/media/$USER/FPGA --csv table.csv    # + one line per sample
 #   host/prepare_sd.sh /run/media/$USER/FPGA --only melody --write   # one folder (and its backup)
+#   host/prepare_sd.sh /run/media/$USER/FPGA --target drums=-11      # loudness target (LUFS) of a folder
+#   host/prepare_sd.sh /run/media/$USER/FPGA --no-loudness           # no levelling
 #
 # New samples: copy them into /drums or /melody (subfolders = banks), run with --write. Files
 # already converted are left as they are; every cache is rewritten.
@@ -16,11 +18,12 @@ OUT="$ROOT/build/host"
 BIN="$OUT/prepare_sd"
 mkdir -p "$OUT"
 if [[ ! -x "$BIN" ]] || [[ -n "$(find "$ROOT/host/prepare_sd.cpp" "$ROOT/fw/transients.c" "$ROOT/fw/transients.h" \
-        "$ROOT/fw/wavutil.c" "$ROOT/fw/wavutil.h" "$ROOT/fw/samples.h" -newer "$BIN")" ]]; then
+        "$ROOT/fw/wavutil.c" "$ROOT/fw/wavutil.h" "$ROOT/fw/samples.h" "$ROOT/host/loudness.cpp" "$ROOT/host/loudness.h" \
+        -newer "$BIN")" ]]; then
     gcc -O2 -c "$ROOT/fw/wavutil.c" -o "$OUT/wavutil.o"
     gcc -O2 -I"$ROOT/fw" -c "$ROOT/fw/transients.c" -o "$OUT/transients.o"
-    g++ -O2 -std=c++17 -I"$ROOT/fw" -I"$ROOT/include" "$ROOT/host/prepare_sd.cpp" \
-        "$OUT/wavutil.o" "$OUT/transients.o" -o "$BIN"
+    g++ -O2 -std=c++17 -I"$ROOT/fw" -I"$ROOT/include" "$ROOT/host/prepare_sd.cpp" "$ROOT/host/loudness.cpp" \
+        "$OUT/wavutil.o" "$OUT/transients.o" -pthread -o "$BIN"
 fi
 CARD="${1:?usage: $0 <card mount point> [--write] [--no-backup] [--csv file] [--only folder]}"
 shift

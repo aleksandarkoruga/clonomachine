@@ -157,6 +157,13 @@ channels (mixed to mono), any rate.
   mono 16-bit (own rate, normalised) and writes `.smpidx` / `.smptr` with the firmware's own
   code. Drum loops that are not 2^k beats get a fitting whole-beats tempo (`list` shows
   "N beats (PC)"); uncertain ones are listed as "maybe". The script builds the tool itself.
+- **Loudness** (`host/loudness.cpp`, checks: `host/test_loudness.cpp`): the report shows each
+  file's loudness (BS.1770 LUFS) and each folder's spread. Files below their folder's target
+  (drums -12, melody -16 LUFS by default, `--target folder=LUFS`) are raised to it: a 3-band
+  compressor and a look-ahead limiter (at most `--limit` dB, default 4) make the room, the peak
+  stays at full scale. Louder files stay as they are (the board would bring a lower peak back
+  up). A levelled file carries a `lvl ` chunk after its audio and isn't levelled again;
+  `--no-loudness` skips the stage.
 - **Transients:** `<dir>/.smptr` caches up to 64 onsets per sample (at most one per 1/64 of
   the sample, the strongest), found on the PC by `host/prepare_sd.sh` or, for files it hasn't
   seen, at boot (the boot lines name them; bank loads only copy); `list` shows the count;
