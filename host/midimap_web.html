@@ -127,7 +127,7 @@ const CONTROL_INFO = {
   separation: ["0 .. 1 = 0 .. ±90 %, linear", "Grains: jitter of the time to the next grain."],
   maxGrains: ["1 .. 32, linear", "Grains: most grains at once for this voice."],
   tempoLock: [SWITCH, "On: the loop is stretched to the global tempo. Off: its own speed (melodies, one-shots)."],
-  bgAdvance: [SWITCH, "On: a background playhead runs with the clock; notes start from it plus their offset."],
+  bgAdvance: [SWITCH, "On: notes start from their position plus the file's own playhead in real time (time since Start at the file's speed: no tempo, no rate)."],
   envHold: [SWITCH, "On: the gate stays open until the note-off."],
   pvTransient: [SWITCH, "Phase vocoder: keep transients sharp (Bungee's transient handling). On by default."],
   algo: ["grains < 64 ≤ phase vocoder", "Time stretcher: BufGrainPlay grains or the Bungee phase vocoder, 5 ms crossfade."],

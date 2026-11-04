@@ -25,7 +25,8 @@ struct slot {
     int32_t overlap_q16, prob_q16, separation_q16, randpos_q16, randompitch_q16;
     /* engine extras */
     int tempo_lock, max_grains, enabled;
-    int bg_advance;          /* trig/pin position = pos + background phasor (keeps playing) */
+    int bg_advance;          /* trig/pin position = pos + the file's own playhead in real time */
+    uint32_t bg_off;         /* u24.8: that playhead when the background last restarted   */
     int algo;                /* 0 grains, 1 phase vocoder (switches live, crossfaded)    */
     int pv_transient;        /* phase vocoder transient handling on                     */
     int note_mode;           /* note -> pos: 0 note/127 of the sample, 1 transient note mod n, 2 as 0, snapped to transients */
@@ -58,6 +59,8 @@ void slot_apply_flags(int s);
 void slot_apply_algo(int s);
 
 void slot_set_pos(int s, int32_t pos_q30); /* UGen pos: >= 0 pins, < 0 runs free */
+void slot_set_bg_advance(int s, int on);
+void slots_transport_start(void);      /* Start: bgAdvance's time counts from here */
 void slot_trig(int s);                 /* POS + stutter params + TRIG strobe */
 void slot_note_on(int s, int note, int repeats); /* repeats < 0: keep the slot's */
 void slot_note_off(int s);             /* ends the gate */

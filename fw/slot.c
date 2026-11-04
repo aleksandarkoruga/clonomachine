@@ -6,6 +6,8 @@
  *   PHASOR_INC = rate * tempoRatio * bufSR / fs  (fs = measured engine rate)
  *   gate       = envBars * 240/globalBpm s       (real time, the same for every loop)
  *   note->pos  = note / 127 of the sample (noteMode 0), transient note mod n (1)
+ *   bgAdvance  = pos + (time since Start * bufSR) mod frames: the file's own playhead
+ *                in real time (no tempo, no rate), whichever file is playing
  *
  * Buffer switches are seamless: the engine keeps every running grain on the buffer it
  * started in, and the playhead is moved (SEEK) to the same sixteenth of the bar in the
@@ -22,6 +24,7 @@ struct slot g_slots[NUM_SLOTS];
 uint32_t g_bpm_milli = 120000;
 
 static uint32_t g_last_base[NUM_SLOTS];
+static uint32_t g_bg_t0; /* sample count at the last Start: bgAdvance's time 0 */
 
 static inline int32_t clampi(int64_t v, int64_t lo, int64_t hi) {
     return (int32_t)(v < lo ? lo : v > hi ? hi : v);
@@ -118,7 +121,7 @@ void slots_init(void) {
         sl->note_mode = s == 0 ? 1 : 0; /* drum notes start on transients */
         sl->pv_transient = 1;
         sl->out = s == 0 ? 0 : 1;       /* drums left, every other voice right */
-        sl->bg_advance = s != 0;        /* melody voices: a note latches pos + the wall clock */
+        sl->bg_advance = s != 0;        /* melody voices: notes start from the file's own playhead */
         sl->max_grains = 32;
         /* initial BufGrainPlay values: a smooth time-stretch; any other texture is just
            other values of the same parameters */
@@ -154,8 +157,8 @@ static void apply_rate_pitch(int s) {
     const int64_t t24 = slot_tempo_ratio_q24(s);
     const int64_t r24 = ((int64_t)sl->rate_q16 * t24) >> 16;
     eng_slot_write(s, SMP_R_PHASOR_INC, (uint32_t)clampi((r24 * srf) >> 24, -0x7F000000LL, 0x7F000000LL));
-    /* the background (bgAdvance) is the wall clock: tempo only, RATE applies from the latch */
-    eng_slot_write(s, SMP_R_BG_INC, (uint32_t)clampi((t24 * srf) >> 24, 0, 0x7F000000LL));
+    /* the background (bgAdvance) runs in real time at the file's own speed: no tempo, no rate */
+    eng_slot_write(s, SMP_R_BG_INC, (uint32_t)clampi(srf, 0, 0x7F000000LL));
     eng_slot_write(s, SMP_R_PITCH,
                    (uint32_t)clampi(((int64_t)sl->pitch_q16 * srf) >> 16, -0x7F000000LL, 0x7F000000LL));
 }
@@ -208,7 +211,19 @@ void slot_apply_tempo(int s) {
 }
 
 static uint32_t pos_reg(const struct slot* sl, const struct sample* smp) {
-    return (uint32_t)(((uint64_t)(sl->pos_q30 & 0x3FFFFFFF) * smp->frames) >> 22); /* u24.8 */
+    const uint32_t p = (uint32_t)(((uint64_t)(sl->pos_q30 & 0x3FFFFFFF) * smp->frames) >> 22); /* u24.8 */
+    if (!sl->bg_advance)
+        return p;
+    return (uint32_t)(((uint64_t)p + sl->bg_off) % ((uint64_t)smp->frames << 8)); /* + background's start */
+}
+
+/* bgAdvance: the background restarts from 0 at the file's own speed and bg_off holds the
+   file's playhead at this moment (time since Start * bufSR, mod its length), so POS +
+   background is always pos + that playhead, also across buffer switches. */
+static void bg_restart(int s, const struct sample* smp) {
+    const uint64_t t = (uint32_t)(eng_status(SMP_SG_SAMPLES) - g_bg_t0);
+    g_slots[s].bg_off = (uint32_t)(((t * sr_factor_q24(smp)) >> 16) % ((uint64_t)smp->frames << 8));
+    eng_slot_write(s, SMP_R_STROBE, SMP_STROBE_BG_RESET);
 }
 
 /* Writes the new buffer; moves the playhead to the same sixteenth of the bar. */
@@ -230,6 +245,7 @@ static void apply_buffer(int s, const struct sample* old) {
             }
             eng_slot_write(s, SMP_R_BASE, base);
             eng_slot_write(s, SMP_R_FRAMES, smp->frames);
+            bg_restart(s, smp);
             if (sl->pos_pin)
                 eng_slot_write(s, SMP_R_POS, pos_reg(sl, smp));
             else if (seek != NOT_RESIDENT) {
@@ -328,6 +344,27 @@ void slot_set_pos(int s, int32_t pos_q30) {
             eng_slot_write(s, SMP_R_POS, pos_reg(sl, smp));
     }
     slot_apply_flags(s);
+}
+
+void slot_set_bg_advance(int s, int on) {
+    struct slot* sl = &g_slots[s];
+    const struct sample* smp = cur_sample(s);
+    sl->bg_advance = !!on;
+    if (sl->pos_pin && smp) /* a pinned position gains / drops the file's playhead now */
+        eng_slot_write(s, SMP_R_POS, pos_reg(sl, smp));
+    slot_apply_flags(s);
+}
+
+void slots_transport_start(void) {
+    g_bg_t0 = eng_status(SMP_SG_SAMPLES);
+    for (int s = 0; s < NUM_SLOTS; ++s) {
+        struct slot* sl = &g_slots[s];
+        const struct sample* smp = cur_sample(s);
+        sl->bg_off = 0;
+        eng_slot_write(s, SMP_R_STROBE, SMP_STROBE_BG_RESET);
+        if (sl->pos_pin && smp)
+            eng_slot_write(s, SMP_R_POS, pos_reg(sl, smp));
+    }
 }
 
 void slot_trig(int s) {

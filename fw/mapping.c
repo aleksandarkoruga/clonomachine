@@ -72,7 +72,7 @@ static void cc(int s, int c, int v) {
     case 17: sl->randompitch_q16 = lut_randpitch[v]; slot_apply_grain(s); break;
     case 18: sl->amp_q16 = (v * 65536) / 127; slot_apply_output(s); break;
     case 20: sl->tempo_lock = v >= 64; slot_apply_tempo(s); break;             /* proposal */
-    case 21: sl->bg_advance = v >= 64; slot_apply_flags(s); break;             /* proposal */
+    case 21: slot_set_bg_advance(s, v >= 64); break;                            /* proposal */
     case 22: sl->algo = v >= 64 ? 1 : 0; slot_apply_algo(s); break;            /* proposal */
     case 23: sl->note_mode = v / 43; break;                                     /* proposal: 0/1/2 */
     default: break;
@@ -112,7 +112,7 @@ static void raw_param(int s, int p, int32_t v) {
     case P_RANDPOS: sl->randpos_q16 = v; slot_apply_grain(s); break;
     case P_RANDOMPITCH: sl->randompitch_q16 = v; slot_apply_grain(s); break;
     case P_TEMPOLOCK: sl->tempo_lock = !!v; slot_apply_tempo(s); break;
-    case P_BGADVANCE: sl->bg_advance = !!v; slot_apply_flags(s); break;
+    case P_BGADVANCE: slot_set_bg_advance(s, v); break;
     case P_MAXGRAINS: sl->max_grains = v; slot_apply_grain(s); break;
     case P_SEED: sl->seed = (uint32_t)v; eng_slot_write(s, SMP_R_SEED, (uint32_t)v); break;
     case P_ENVDUR: sl->env_abs = 1; sl->env_sec_q16 = v; slot_apply_tempo(s); break;
@@ -169,11 +169,10 @@ void mapping_event(const struct smp_event* e) {
     case EV_BPM:
         set_global_bpm((uint32_t)e->value);
         break;
-    case EV_START: /* beat counter and every background playhead restart together */
+    case EV_START: /* the beat counter restarts, bgAdvance's time counts from here */
         esplink_transport(1);
         eng_write(SMP_ADDR(SMP_GLOBAL_SLOT, SMP_G_BEAT_CTRL), 1);
-        for (int i = 0; i < NUM_SLOTS; ++i)
-            eng_slot_write(i, SMP_R_STROBE, SMP_STROBE_BG_RESET);
+        slots_transport_start();
         break;
     case EV_STOP: /* transport stop: every voice's gate closes (1 ms ramp) */
         esplink_transport(0);

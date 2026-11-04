@@ -119,7 +119,7 @@ python host/ftdi_console.py -i                      # shell (status, list, buf, 
 python host/osc_bridge.py                           # OSC udp:57130 -> board, 1 Mbaud (see host/sampler_example.scd)
 python host/osc_stress.py                           # Monomachine-like load test against the bridge
 python host/console_cmd.py status usb "list 1"      # one-shot console lines (fixed read time each)
-python host/check_wallclock.py                      # board check: bgAdvance latch vs rate
+python host/check_wallclock.py                      # board check: bgAdvance = the file's own playhead
 cd sim && make run                                  # RTL == model regression
 cd sim && make pvrun                                # pv_unit == pv_model, job by job, all stages
 g++ -O2 -std=c++20 -fwrapv -DPV_RTL_DIR=\"$PWD/rtl\" -o pv_render model/pv_render.cpp model/pv_float.cpp model/pv_model.cpp
@@ -179,7 +179,7 @@ file with these (the old one stays as `/midimap.json.bak`). Other channels use t
 table.
 
 - **Clock:** the global bpm follows MIDI clock (least-squares slope over the last 96 ticks,
-  ticks the cable lost counted in from the interval, 0.1 bpm steps); `clock 0` turns that off. **Start** restarts the beat and every background playhead, **Stop**
+  ticks the cable lost counted in from the interval, 0.1 bpm steps); `clock 0` turns that off. **Start** restarts the beat and the time `bgAdvance` counts, **Stop**
   closes every gate, **Continue** changes nothing.
 - The Elektron TM-1 does not come up on US2 (it reboots: US2 seems to give it too little 5 V);
   TurboMIDI from the Machinedrum can't be read by a plain cable (set the MD to 1x).
@@ -224,9 +224,11 @@ table.
 - Outputs: slot 0 (drums) on the left channel, every other slot on the right;
   `/slot/n/out` 0 left, 1 right, 2 both.
 - Voices: 0 plays `/drums`, 1 and 2 play `/melody`. Defaults: time stretcher, drum notes on
-  transients, melody voices with `bgAdvance` (a note latches pos + the wall clock).
-- `bgAdvance`: the background playhead is the wall clock (tempo only); a trigger latches
-  pos + background, then the playhead runs at `rate` from there (slow, reverse...).
+  transients, the melody voices with `bgAdvance` (the drums without).
+- `bgAdvance`: a note starts from pos + the file's own playhead in real time, the time since
+  Start at the file's sample rate wrapped at its length (no tempo, no rate; after a buffer
+  switch the new file's own playhead), then the playhead runs at `rate` from there (slow,
+  reverse...). Not synced to the bars: a long file plays a different part on every pass.
 
 ## Board facts (this unit)
 

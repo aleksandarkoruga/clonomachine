@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Board check of the bgAdvance wall clock (BG_INC): a melody voice at rate 0.25 plays a
-note, then the same note again a few seconds later. The second latch must move by the wall
-clock (tempo only), while the playhead in between runs at rate 0.25. Prints both, unwrapped
-by the loop length. Changes voice 1's settings and turns clock follow off (power-cycle or
-'clock 1' afterwards). The bridge must not be running."""
+"""Board check of bgAdvance: a note starts from pos + the file's own playhead in real time
+(the time since Start at the file's sample rate, wrapped at its length), whatever the tempo
+and rate, also after a buffer switch. Voice 1 at rate 0 (the playhead stays on the latch)
+plays note 0 three times: the second start must have moved by the time in between at the
+file's speed, the third (after a switch to the next buffer and back) by the time since the
+first. Restores voice 1's rate, buffer and bgAdvance afterwards. Nothing else may hold the
+console (midimap_web.py, osc_bridge.py ...)."""
 import os, re, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ftdi_console import open_console
 
+FS = 48014.3
 f = open_console()
 def rd(t):
     out, end = b"", time.time() + t
@@ -19,26 +22,46 @@ def rd(t):
 def cmd(c, t=0.4):
     f.write_data(c.encode() + b"\r")
     return rd(t)
-def snap():
-    st = cmd("status", 0.5)
-    smp = int(re.search(r"samples (\d+)", st).group(1))
-    m = re.search(r"slot 1: lib \d bank (\d+) buf (\d+)  phasor (\d+).*?ratio ([0-9.]+)", st)
-    return smp, int(m.group(3)), float(m.group(4)), int(m.group(1)), int(m.group(2))
+SLOT1 = re.compile(r"slot 1: lib \d bank (\d+) buf (\d+)  phasor (\d+).*?ratio ([0-9.]+)  rate (-?[0-9.]+)"
+                   r".*?bgAdvance (\d)")
+def note():  # the latch, read right after the note (rate 0: the playhead stays there)
+    st = cmd("note 1 0 1\rstatus", 0.6)
+    m = SLOT1.search(st)
+    return int(re.search(r"samples (\d+)", st).group(1)), int(m.group(3)), (int(m.group(1)), int(m.group(2)))
 
 rd(0.3)
-cmd("clock 0"); cmd("bpm 120"); cmd("set 1 envHold 1"); cmd("set 1 rate 0.25")
-cmd("note 1 12 1"); s1, p1, ratio, bank, buf = snap()
-time.sleep(2.0)
-s2a, p2a, _, _, _ = snap()
-cmd("note 1 12 1"); s2, p2, _, _, _ = snap()
+m = SLOT1.search(cmd("status", 0.5))
+bank, buf, ratio, rate0, bg0 = int(m.group(1)), int(m.group(2)), float(m.group(4)), m.group(5), m.group(6)
 lst = cmd("list 1 %d" % bank, 1.0)
 m = re.search(r"^\s*%d \*? ?.*?(\d+) ms (\d+) Hz" % buf, lst, re.M)
 ms, sr = int(m.group(1)), int(m.group(2))
-frames = round(ms * sr / 1000 / 64) * 64 if ms % 1000 else ms * sr // 1000
-srf = sr / 48014.3
-wall = (s2 - s1) * ratio * srf
-print("loop ~%d frames at %d Hz, tempo ratio %.3f" % (frames, sr, ratio))
-print("latch moved   %7d frames, wall clock predicts %7.0f" % ((p2 - p1) % frames, wall))
-print("playhead ran  %7d frames between the first two reads (rate 0.25)" % ((p2a - p1) % frames))
-cmd("set 1 rate 1"); cmd("set 1 envHold 0"); cmd("set 1 gateOff 1"); cmd("clock 1")
+frames = ms * sr / 1000.0          # to the ms: only matters where the difference wraps
+srf = sr / FS
+nbuf = len(re.findall(r"^\s*\d+ [* ] ", lst, re.M))
+
+cmd("set 1 rate 0"); cmd("set 1 bgAdvance 1")
+s1, p1, b1 = note()
+time.sleep(1.5)
+s2, p2, b2 = note()
+if nbuf > 1:
+    cmd("set 1 bufNum %d" % ((buf + 1) % nbuf), 0.6)
+    cmd("set 1 bufNum %d" % buf, 0.6)
+time.sleep(0.5)
+s3, p3, b3 = note()
+cmd("set 1 rate %s" % rate0); cmd("set 1 bgAdvance %s" % bg0); cmd("set 1 gateOff 1")
 f.close()
+
+def err(moved, want):
+    d = (moved - want) % frames
+    return min(d, frames - d)
+print("file %d/%d: %d ms at %d Hz (%.0f frames), tempo ratio %.3f (must not matter)" % (bank, buf, ms, sr, frames, ratio))
+if not (b1 == b2 == b3 == (bank, buf)):
+    print("the buffer changed under the test (%s %s %s): run it again" % (b1, b2, b3))
+for name, (sa, pa), (sb, pb) in (("second note", (s1, p1), (s2, p2)),
+                                 ("after the switch" if nbuf > 1 else "third note", (s1, p1), (s3, p3))):
+    want = (sb - sa) * srf
+    moved = (pb - pa) % frames
+    e = err(moved, want)
+    print("%-17s start moved %8.0f frames, real time at the file's speed %8.0f (off by %4.0f)%s"
+          % (name, moved, want % frames, e, "" if e < 0.004 * frames + 100 else "  <-- WRONG"))
+    print("%-17s (with the tempo it would be %8.0f)" % ("", (want * ratio) % frames))
