@@ -35,7 +35,7 @@ static uint32_t refine(tr_get_fn get, void* ctx, uint32_t frames, uint32_t b) {
     return i;
 }
 
-int tr_analyse(tr_get_fn get, void* ctx, uint32_t frames, uint32_t* pos, void (*idle)(void)) {
+int tr_analyse(tr_get_fn get, void* ctx, uint32_t frames, uint32_t bins, uint32_t* pos, void (*idle)(void)) {
     struct cand c[TR_MAX * 2];
     int nc = 0;
     const uint32_t nb = frames / TR_BLOCK;
@@ -96,20 +96,39 @@ int tr_analyse(tr_get_fn get, void* ctx, uint32_t frames, uint32_t* pos, void (*
         last = b;
         have_last = 1;
     }
-    /* level filter */
+    /* level filter, then without bins the TR_MAX strongest */
     int n = 0;
     for (int k = 0; k < nc; ++k)
         if (c[k].level >= lmax - TR_RANGE)
             c[n++] = c[k];
+    while (!bins && n > TR_MAX) {
+        int w = 0;
+        for (int k = 1; k < n; ++k)
+            if (c[k].rise < c[w].rise)
+                w = k;
+        for (int k = w; k < n - 1; ++k)
+            c[k] = c[k + 1];
+        --n;
+    }
     int out = 0;
-    /* the start counts when it begins loud (most loops start on a hit) */
-    if (l0 >= lmax - TR_RANGE && (n == 0 || c[0].block > TR_REFRACT))
+    int32_t last_rise = 0;
+    /* the start counts when it begins loud (most loops start on a hit); it keeps its bin */
+    if (l0 >= lmax - TR_RANGE && (n == 0 || c[0].block > TR_REFRACT)) {
         pos[out++] = 0;
-    /* the first onset of each 1/TR_BINS of the sample */
-    for (int k = 0; k < n && out < TR_MAX; ++k) {
+        last_rise = INT32_MAX;
+    }
+    /* with bins: the strongest onset of each 1/bins of the sample */
+    for (int k = 0; k < n; ++k) {
         const uint32_t p = refine(get, ctx, frames, c[k].block);
-        if (out == 0 || ((uint64_t)p * TR_BINS) / frames > ((uint64_t)pos[out - 1] * TR_BINS) / frames)
+        if (bins && out && ((uint64_t)p * bins) / frames == ((uint64_t)pos[out - 1] * bins) / frames) {
+            if (c[k].rise > last_rise) {
+                pos[out - 1] = p;
+                last_rise = c[k].rise;
+            }
+        } else if (out < TR_MAX && (out == 0 || p > pos[out - 1])) {
             pos[out++] = p;
+            last_rise = c[k].rise;
+        }
     }
     return out;
 }

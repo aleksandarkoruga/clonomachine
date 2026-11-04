@@ -25,7 +25,7 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < x.size(); ++i)
             x[i] = int16_t(std::lrint(std::fmax(-1.0, std::fmin(1.0, w.x[i])) * 32767));
         uint32_t pos[TR_MAX];
-        const int n = tr_analyse(get, &x, uint32_t(x.size()), pos, nullptr);
+        const int n = tr_analyse(get, &x, uint32_t(x.size()), TR_BINS, pos, nullptr);
         std::printf("%s: %.2f s, %d transients\n ", argv[a], double(x.size()) / w.rate, n);
         for (int k = 0; k < n; ++k)
             std::printf(" %.3f", double(pos[k]) / w.rate);

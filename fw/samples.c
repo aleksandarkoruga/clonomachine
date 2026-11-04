@@ -559,14 +559,14 @@ static void add_dir_wavs(struct lib* L, const char* dir, const char* prefix) {
 }
 
 /* ---- transients: pool + per-folder cache file ------------------------------------- */
-/* positions of all samples together: 96K (384 KB) holds today's 958 samples at the full 64
-   with room; when it is full, later samples are analysed at load but not kept */
+/* positions of all samples together: 96K (384 KB) holds today's 1279 samples (~27 each,
+   at most 64) with room; when it is full, later samples get none */
 #define TR_POOL (96u * 1024u)
 static uint32_t g_tr_pool[TR_POOL];
 static uint32_t g_tr_used;
 static int g_tr_dirty[MAX_LIBS];
 #define TRF_MAGIC 0x4E525453u /* 'STRN' */
-#define TRF_VERSION 2 /* 2: at most one transient per 1/64 of the sample (version 1 files are analysed again) */
+#define TRF_VERSION 3 /* 3: the strongest transient per 1/64 of the sample (older files are analysed again) */
 struct trf_hdr { uint32_t magic, version, count, rec_size; };
 /* peak: of the 16-bit copy (0 in older files); the only place the peak of a part is kept */
 struct trf_rec { uint32_t fsize; uint16_t fdate, ftime; uint32_t hash; uint8_t n, pad; int16_t peak; };
@@ -940,30 +940,37 @@ static int job_start(void) {
     }
 }
 
-/* Converts one chunk. Returns 1 when the file is complete. */
-static int job_chunk(void) {
-    struct bank* b = samples_bank(g_job.lib, g_job.bank);
-    struct sample* s = samples_get(g_job.lib, g_job.bank, g_job.idx);
+/* Reads and converts the next chunk of s (frames from done on) to d[done..]; returns the
+   frames converted, 0 at the end or on a read error. */
+static uint32_t read_chunk(FIL* f, const struct sample* s, volatile int16_t* d, uint32_t done, int32_t gain) {
     const uint32_t bps = s->bits / 8u, fb = bps * s->ch;
-    uint32_t want = s->frames - g_job.done;
+    uint32_t want = s->frames - done;
     if (want > sizeof(g_io) / fb)
         want = sizeof(g_io) / fb;
     while (want > 4 && ((want * fb) & 3)) /* keep reads word aligned (fast DMA path) */
         --want;
     UINT n = 0;
-    if (want && f_read(&g_job.f, g_io, want * fb, &n) != FR_OK)
+    if (want && f_read(f, g_io, want * fb, &n) != FR_OK)
         n = 0;
     idle_hook();
     want = n / fb;
-    int16_t* d = (int16_t*)(g_mem + b->base + s->offset + SMP_PREPAD + g_job.done); /* flushed at finish */
+    int16_t* o = (int16_t*)(d + done); /* flushed at finish */
     for (uint32_t i0 = 0; i0 < want; i0 += 4096) { /* 4096-frame slices, hook in between */
         const uint32_t i1 = (want - i0 > 4096) ? i0 + 4096 : want;
-        wav_convert(d + i0, g_io + i0 * fb, i1 - i0, s->fmt, s->ch, s->bits, (int32_t)g_job.gain);
+        wav_convert(o + i0, g_io + i0 * fb, i1 - i0, s->fmt, s->ch, s->bits, gain);
         idle_hook();
     }
-    g_job.done += want;
     g_load_bytes += n;
-    return want == 0 || g_job.done >= s->frames;
+    return want;
+}
+
+/* Converts one chunk. Returns 1 when the file is complete. */
+static int job_chunk(void) {
+    struct bank* b = samples_bank(g_job.lib, g_job.bank);
+    struct sample* s = samples_get(g_job.lib, g_job.bank, g_job.idx);
+    const uint32_t got = read_chunk(&g_job.f, s, g_mem + b->base + s->offset + SMP_PREPAD, g_job.done, (int32_t)g_job.gain);
+    g_job.done += got;
+    return got == 0 || g_job.done >= s->frames;
 }
 
 static void job_finish(void) {
@@ -980,12 +987,6 @@ static void job_finish(void) {
     s->ready = 1;
     if (bank_complete(g_job.lib, b))
         b->state = BANK_RESIDENT;
-    if (s->ntr == TR_NONE) { /* first load: find the transients (cached in .smptr) */
-        uint32_t pos[TR_MAX];
-        const int n = tr_analyse(tr_get, (void*)(g_mem + b->base + s->offset + SMP_PREPAD), s->frames, pos, idle_hook);
-        tr_store(s, pos, n);
-        g_tr_dirty[g_job.lib] = 1;
-    }
     const uint32_t ms = (now_samples() - g_job.t0) / 48;
     g_load_ms += ms;
     ++g_load_count;
@@ -1087,6 +1088,49 @@ int samples_write_file(const char* path, const char* buf, int n) {
     return (r == FR_OK && put == (UINT)n) ? 0 : -1;
 }
 
+/* At boot (and rescan), before anything is loaded: every sample the caches don't know (a new
+   or changed file the PC tool hasn't prepared) is read once into the first pool region and
+   gets its peak and transients, so bank loads only copy. Returns how many were analysed. */
+static int analyse_new(int l) {
+    struct lib* L = &g_libs[l];
+    volatile int16_t* d = g_mem + POOL_START_WORDS + SMP_PREPAD;
+    int n = 0;
+    for (int i = 0; i < L->count; ++i) {
+        struct sample* s = &L->s[i];
+        if (s->ntr != TR_NONE)
+            continue;
+        char path[SAMPLE_NAME_LEN + 16];
+        FIL f;
+        path_of(path, sizeof(path), l, s->name);
+        if (s->seg == 0)
+            printf("SD: analysing %s%s\n", path, s->nseg > 1 ? " (parts)" : "");
+        if (f_open(&f, path, FA_READ) != FR_OK || f_lseek(&f, s->data_off) != FR_OK) {
+            printf("SD: cannot open %s\n", path);
+            continue;
+        }
+        const int normalized = g_normalize && s->peak > 0 && s->peak < 32767;
+        const int32_t gain = normalized ? (int32_t)((32767u << 16) / (uint32_t)s->peak) : 65536;
+        uint32_t done = 0, got;
+        while (done < s->frames && (got = read_chunk(&f, s, d, done, gain)) != 0)
+            done += got;
+        f_close(&f);
+        for (uint32_t k = done; k < s->frames; ++k) /* short read: as the loader does */
+            d[k] = 0;
+        if (!s->peak)
+            g_idx_dirty[l] = 1;
+        finish_buffer(d, s, normalized);
+        uint32_t pos[TR_MAX];
+        tr_store(s, pos, tr_analyse(tr_get, (void*)d, s->frames, TR_BINS, pos, idle_hook));
+        g_tr_dirty[l] = 1;
+        ++n;
+    }
+    if (g_idx_dirty[l])
+        idx_save(l);
+    if (g_tr_dirty[l])
+        trf_save(l);
+    return n;
+}
+
 int samples_init(void) {
     if (g_job.active) { /* rescan while loading: drop the job before the table is rebuilt */
         f_close(&g_job.f);
@@ -1121,6 +1165,12 @@ int samples_init(void) {
     for (int l = 0; l < MAX_LIBS; ++l)
         total += index_lib(l);
     printf("SD: indexed %d WAVs in %lu ms\n", total, (unsigned long)((now_samples() - t0) / 48));
+    const uint32_t t1 = now_samples();
+    int fresh = 0;
+    for (int l = 0; l < MAX_LIBS; ++l)
+        fresh += analyse_new(l);
+    if (fresh)
+        printf("SD: analysed %d new samples in %lu ms\n", fresh, (unsigned long)((now_samples() - t1) / 48));
     return total;
 }
 

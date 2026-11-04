@@ -151,8 +151,9 @@ channels (mixed to mono), any rate.
   code. Drum loops that are not 2^k beats get a fitting whole-beats tempo (`list` shows
   "N beats (PC)"); uncertain ones are listed as "maybe". The script builds the tool itself.
 - **Transients:** `<dir>/.smptr` caches up to 64 onsets per sample (at most one per 1/64 of
-  the sample, the first), found when a sample is first loaded (`list` shows the count, the
-  boot line how many are analysed so far); used by `noteMode` 1/2.
+  the sample, the strongest), found on the PC by `host/prepare_sd.sh` or, for files it hasn't
+  seen, at boot (the boot lines name them; bank loads only copy); `list` shows the count;
+  used by `noteMode` 1/2.
 
 ## MIDI (USB-MIDI cable on US2)
 

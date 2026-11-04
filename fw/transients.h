@@ -1,14 +1,15 @@
 /* Transient (onset) detection for note -> position mapping. Plain C, no hardware
- * dependencies: runs on the SoC when a sample is first loaded (results cached on the SD
- * card in <folder>/.smptr) and on the host for tuning (host/test_transients.cpp).
+ * dependencies: runs on the PC (host/prepare_sd.cpp, host/test_transients.cpp) and on the
+ * SoC at boot for files the cache on the SD card (<folder>/.smptr) doesn't know yet.
  *
  * Detection: the sum of |x[i] - x[i-1]| (high-frequency energy, emphasises attacks) per
  * 64-sample block, Mitchell log2; an onset is a rise of TR_RISE over the minimum of the
  * previous three blocks (~4 ms), at most one per TR_REFRACT blocks (the strongest), and
  * within TR_RANGE of the loudest block. Each onset is placed just before the attack: the
- * first sample reaching a quarter of the block peak, moved back to a zero crossing. At most
- * one onset per 1/TR_BINS of the sample, the first: dense files keep positions spread over
- * the whole file instead of clusters that sound alike.
+ * first sample reaching a quarter of the block peak, moved back to a zero crossing. The cached
+ * transients keep at most one onset per 1/TR_BINS of the sample, the strongest (the start,
+ * when it counts, keeps its bin): dense files keep positions spread over the whole file, each
+ * on a clear accent, instead of clusters that sound alike.
  */
 #ifndef TRANSIENTS_H
 #define TRANSIENTS_H
@@ -26,7 +27,9 @@
 typedef int16_t (*tr_get_fn)(void* ctx, uint32_t i);
 
 /* Finds up to TR_MAX onsets of a mono 16-bit sample; positions in samples, ascending.
-   idle (may be 0) is called every few thousand samples. Returns the count. */
-int tr_analyse(tr_get_fn get, void* ctx, uint32_t frames, uint32_t* pos, void (*idle)(void));
+   bins: TR_BINS for the cached transients (the strongest per 1/bins of the sample), 0 for
+   the TR_MAX strongest anywhere (the PC tool's loop-tempo fit). idle (may be 0) is called
+   every few thousand samples. Returns the count. */
+int tr_analyse(tr_get_fn get, void* ctx, uint32_t frames, uint32_t bins, uint32_t* pos, void (*idle)(void));
 
 #endif

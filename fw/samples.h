@@ -11,10 +11,11 @@
  * fill banks of their own, so program change steps through the file and CC1 picks
  * the part inside the bank.
  *
- * Boot only indexes: "<dir>/.smpidx" caches format, length, BPM and peak per WAV,
- * keyed on name + size + timestamp, so only new or changed files are parsed.
- * Transients (fw/transients.c) are found when a sample is first loaded and cached in
- * "<dir>/.smptr" (same keys), for the transient note -> position mode.
+ * Boot indexes: "<dir>/.smpidx" caches format, length, BPM and peak per WAV, keyed on
+ * name + size + timestamp, so only new or changed files are parsed. "<dir>/.smptr" (same
+ * keys) caches the transients (fw/transients.c, for the transient note -> position mode);
+ * files neither cache knows are read once at boot for their peak and transients (the PC
+ * tool host/prepare_sd.sh does all of it beforehand), so bank loads only copy.
  */
 #ifndef SAMPLES_H
 #define SAMPLES_H

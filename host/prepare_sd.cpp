@@ -409,9 +409,11 @@ static void do_lib(const fs::path& dir, bool write, Totals& tot) {
                 part.swap(scaled);
             }
             uint32_t pos[TR_MAX];
-            const int nt = tr_analyse(get16, &part, n, pos, nullptr);
-            if (parts == 1 && dir.filename() == "drums") {
-                const LoopTempo lt = loop_tempo(name, n, w.sr, pos, nt);
+            const int nt = tr_analyse(get16, &part, n, TR_BINS, pos, nullptr);
+            if (parts == 1 && dir.filename() == "drums") { /* the tempo fit: every onset, not one per bin */
+                uint32_t all[TR_MAX];
+                const int na = tr_analyse(get16, &part, n, 0, all, nullptr);
+                const LoopTempo lt = loop_tempo(name, n, w.sr, all, na);
                 idx.back().bpm_x100 = lt.bpm_x100;
                 if (lt.bpm_x100 || lt.maybe) {
                     int32_t bl = 0;
@@ -459,7 +461,7 @@ static void do_lib(const fs::path& dir, bool write, Totals& tot) {
     }
     {
         FILE* f = std::fopen((dir / ".smptr").c_str(), "wb");
-        const TrfHdr h{0x4E525453u, 2, ntrf, sizeof(TrfRec)}; // TRF_VERSION in fw/samples.c
+        const TrfHdr h{0x4E525453u, 3, ntrf, sizeof(TrfRec)}; // TRF_VERSION in fw/samples.c
         std::fwrite(&h, sizeof(h), 1, f);
         std::fwrite(trf.data(), 1, trf.size(), f);
         std::fclose(f);
