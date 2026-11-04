@@ -76,6 +76,7 @@ static void params_default(struct cut_params* p) {
     p->accel = 1.0f;
     p->max_silences = 1;
     p->swap = 1;
+    p->arrange = 1.0f;
 }
 
 void cut_preset(struct cutter* c, int n) {
@@ -105,6 +106,8 @@ void cut_set_silences(struct cutter* c, int n) { c->p.max_silences = n < 0 ? -1 
 
 void cut_set_swap(struct cutter* c, int on) { c->p.swap = !!on; }
 
+void cut_set_arrange(struct cutter* c, float v) { c->p.arrange = clamp01(v); }
+
 void cut_init(struct cutter* c, uint32_t seed) {
     memset(c, 0, sizeof(*c));
     params_default(&c->p);
@@ -115,6 +118,7 @@ void cut_init(struct cutter* c, uint32_t seed) {
     c->n16 = 16;
     c->last_buf = -1;
     c->last_rate = 1;
+    c->held = -1;
 }
 
 /* ---- the conductor ------------------------------------------------------------------------ */
@@ -199,36 +203,57 @@ static float metric(const struct cutter* c, int n, int levels) {
     return den > 0 ? num / den : 1;
 }
 
-/* a bar's hits: density hits, the bits of an intensity number placed in metric
-   order (the most salient position takes the top bit), fixed up from the least salient end */
+/* a bar's hits, as the SC pattern generator: an intensity
+   number of n bits, randomised within the syncopation knob's step (each of the 128 knob values
+   holds 2^n / 128 numbers), its count of ones moved to the density from the low end (the nearest
+   number with that many hits), and bit r on the position of metric rank r. The rank of a
+   position is its bit reversal (the downbeat 0, the half bar 1, the quarters 2 3,
+   then the 8ths, then the 16ths), so low numbers hit the strong positions, high ones the weak. */
 static uint16_t bar_pattern(struct cutter* c, float density, float sync) {
     const int n = bar16(c) > 16 ? 16 : bar16(c);
-    int order[16];
-    for (int i = 0; i < n; ++i)
+    int nb = 1, mask[16], order[16], rank[16];
+    while ((1 << nb) < n)
+        ++nb;
+    for (int i = 0; i < n; ++i) {
+        int m = 0;
+        for (int b = 0; b < nb; ++b)
+            if ((i >> b) & 1)
+                m |= 1 << (nb - 1 - b);
+        mask[i] = m;
         order[i] = i;
-    for (int i = 1; i < n; ++i) { /* by metric weight, strongest first (insertion sort) */
+    }
+    for (int i = 1; i < n; ++i) { /* positions by bit reversal (insertion sort) */
         const int v = order[i];
         int j = i;
-        for (; j > 0 && metric(c, order[j - 1], 3) < metric(c, v, 3); --j)
+        for (; j > 0 && mask[order[j - 1]] > mask[v]; --j)
             order[j] = order[j - 1];
         order[j] = v;
     }
+    for (int j = 0; j < n; ++j)
+        rank[order[j]] = j;
     const float d = clamp01(density * (0.6f + 0.8f * uni(&c->rng_phrase)));
     const int k = (int)(d * (float)n + 0.5f);
-    const float inten = clamp01(1 - sync + (uni(&c->rng_phrase) - 0.5f) * 0.3f);
-    const uint32_t I = (uint32_t)(inten * (float)((1u << n) - 1));
-    int bits[16], count = 0;
-    for (int j = 0; j < n; ++j)
-        count += bits[j] = (int)((I >> (n - 1 - j)) & 1);
-    for (int j = n - 1; j >= 0 && count != k; --j)
-        if (bits[j] == (count > k)) {
-            bits[j] ^= 1;
-            count += bits[j] ? 1 : -1;
+    const int step = (int)lrintf(clamp01(sync) * 127.0f);
+    uint32_t I = (uint32_t)(((float)step + uni(&c->rng_phrase)) / 128.0f * (float)(1u << n));
+    if (I >= (1u << n))
+        I = (1u << n) - 1;
+    int count = 0;
+    for (int b = 0; b < n; ++b)
+        count += (int)((I >> b) & 1);
+    for (int b = 0; b < n && count != k; ++b) { /* to the density, from the low end */
+        const uint32_t bit = 1u << b;
+        if (count < k && !(I & bit)) {
+            I |= bit;
+            ++count;
+        } else if (count > k && (I & bit)) {
+            I &= ~bit;
+            --count;
         }
+    }
     uint16_t pat = 0;
-    for (int j = 0; j < n; ++j)
-        if (bits[j])
-            pat |= (uint16_t)(1u << order[j]);
+    for (int pos = 0; pos < n; ++pos)
+        if ((I >> rank[pos]) & 1)
+            pat |= (uint16_t)(1u << pos);
     return pat;
 }
 
@@ -256,6 +281,34 @@ static int silence_ok(const struct cutter* c, int at_release) {
     return max < 0 || c->silences + reserve < max;
 }
 
+/* ---- the base arrangement ------------------------------------------------------------------
+ * The SC cutters' arrangement: every hit reads from
+ *   pos = (progress + bar offset + stability) rounded to 1/16 of the buffer
+ * instead of where the loop would be, so the loop's own pieces come in a new order and the cuts
+ * act on that. s counts 32nds from the start; the SC step index is s mod 512 (16 bars).
+ * progress = index / 128 sweeps the buffer once every 4 bars; the offset (cycle / 8, rounded to
+ * quarters) moves on by a quarter of the buffer about every second 16-bar cycle; stability =
+ * stability(index, 7) * stability(cycle mod 2, 4), how early the step sits in each unit
+ * from the 16th to the 4 bars: a sum of saws at those scales. */
+static float wrap01(float x) { return x - floorf(x); }
+
+static float stability_sc(uint32_t num, int max_pow) { /* the SC metric stability */
+    uint32_t v = 0;
+    for (int i = 0; i < max_pow; ++i) {
+        const uint32_t pw = 2u << i;
+        v += pw - num % pw;
+    }
+    return (float)v / (float)(2u << max_pow);
+}
+
+static float arranged(uint32_t s) {
+    const uint32_t index = s % 512u, cycle = s / 512u;
+    const float progress = (float)index / 128.0f;
+    const float offset = floorf((float)cycle * 0.5f + 0.5f) * 0.25f; /* (cycle / 8).round(0.25) */
+    const float st = stability_sc(index, 7) * stability_sc(cycle % 2u, 4);
+    return wrap01(floorf((progress + offset + st) * 16.0f + 0.5f) / 16.0f);
+}
+
 /* ---- output -------------------------------------------------------------------------------- */
 static struct cut_frame* frame_at(struct cutter* c, float delay) {
     if (c->nq >= CUT_QUEUE)
@@ -273,7 +326,6 @@ static void ev(struct cut_frame* f, int pid, int32_t v) {
     }
 }
 static int32_t q16(float x) { return (int32_t)lrintf(x * 65536.0f); }
-static float wrap01(float x) { return x - floorf(x); }
 static void trig_at(struct cut_frame* f, float pos) {
     ev(f, P_POS, (int32_t)(wrap01(pos) * 1073741824.0f));
     ev(f, P_TRIG, 0);
@@ -281,10 +333,12 @@ static void trig_at(struct cut_frame* f, float pos) {
 }
 
 #define AMP 1.0f   /* unity, every hit */
-/* one hit: buffer, volume, speeds, stutter, then the position + trigger. The gate length is the
-   drum page's (MIDI): it sets how long each cut sounds, so the spacing of the silences. */
+/* one hit: buffer, volume, speeds, stutter, gate hold, then the position + trigger. The gate
+   length is the drum page's (MIDI): it sets how long each cut sounds. hold 1 keeps the gate open
+   through a move that runs for a while without new triggers (a stutter's retriggers, a freeze,
+   a tape stop); the next hit (its return) lets it go again. */
 static struct cut_frame* hit(struct cutter* c, float delay, int buf, float amp, float rate, float pitch, int repeats,
-                             float interval, float pos) {
+                             float interval, float pos, int hold) {
     struct cut_frame* f = frame_at(c, delay);
     if (!f)
         return 0;
@@ -298,6 +352,10 @@ static struct cut_frame* hit(struct cutter* c, float delay, int buf, float amp, 
     ev(f, P_REPEATS, repeats);
     if (repeats)
         ev(f, P_INTERVAL, q16(interval > 0.25f ? 0.25f : interval));
+    if (hold != c->held) {
+        ev(f, P_ENVHOLD, hold);
+        c->held = hold;
+    }
     trig_at(f, pos);
     c->last_rate = rate;
     return f;
@@ -323,7 +381,7 @@ static int choose_move(const struct cutter* c, float d, float r) {
 }
 
 /* the 16th n of the phrase (with its 32nd step for timing) */
-static void sixteenth(struct cutter* c, int n, int emit) {
+static void sixteenth(struct cutter* c, uint32_t s, int n, int emit) {
     float r[NDRAW];
     const float mut = 0.15f * (1 - c->e.knob[CK_MEMORY]);
     const int P = phrase16(c);
@@ -346,14 +404,17 @@ static void sixteenth(struct cutter* c, int n, int emit) {
     const int L = c->n16 > 0 ? c->n16 : 16;
     const float natural = (float)(n % L) / (float)L;
     const float g16 = 1.0f / (float)L;
+    /* the base: the arrangement for this step, or (arrange below 1) the loop's own position */
+    const int arr = r[9] < c->e.arrange;
+    const float base = arr ? arranged(s) : natural;
     const float w = metric(c, n, 4);
     const float rel = c->e.knob[CK_RELEASE] * 0.5f;
     const int in_release = rel > 0 && p >= 1 - rel;
     const int release_start = in_release && (n == 0 || (float)(n - 1) / (float)P < 1 - rel);
     int buf = c->e.base_buf;
 
-    if (n == 0) { /* back on the one: the loop where it belongs, everything reset */
-        hit(c, 0, buf, AMP, 1, 1, 0, 0, natural);
+    if (n == 0) { /* the phrase starts: on the base again, everything reset */
+        hit(c, 0, buf, AMP, 1, 1, 0, 0, base, 0);
         ++c->stats_hits[M_ONE];
         c->busy_until = 0;
         c->resume = 0;
@@ -361,7 +422,7 @@ static void sixteenth(struct cutter* c, int n, int emit) {
     }
     if (c->now < c->busy_until)
         return;
-    const int resume = c->resume; /* after a stutter or a silence: the loop where it would be */
+    const int resume = c->resume; /* after a stutter or a silence: the base again */
     c->resume = 0;
     if (in_release) {
         if (c->e.release_mode == CR_DROP && release_start && silence_ok(c, 1)) {
@@ -372,7 +433,7 @@ static void sixteenth(struct cutter* c, int n, int emit) {
         }
         if (c->e.release_mode != CR_FILL) { /* run (or no drop): the loop plays on */
             if (resume)
-                hit(c, 0, buf, AMP, 1, 1, 0, 0, natural);
+                hit(c, 0, buf, AMP, 1, 1, 0, 0, base, 0);
             return;
         }
         if (c->e.swap)
@@ -385,7 +446,7 @@ static void sixteenth(struct cutter* c, int n, int emit) {
         is_hit = is_hit || r[1] < 0.5f;
     if (!is_hit) {
         if (resume)
-            hit(c, 0, buf, AMP, 1, 1, 0, 0, natural);
+            hit(c, 0, buf, AMP, 1, 1, 0, 0, base, 0);
         return;
     }
 
@@ -399,31 +460,34 @@ static void sixteenth(struct cutter* c, int n, int emit) {
     if (in_release && c->e.release_mode == CR_FILL && (m < M_REPEAT || m == M_DROP))
         m = r[3] < 0.5f ? M_REPEAT : M_RATCHET;
     ++c->stats_hits[m];
-    float pos = natural, rate = 1, pitch = 1, stab = 0;
+    float pos = base, rate = 1, pitch = 1, stab = 0;
 
     switch (m) {
     case M_STRAIGHT:
         break;
     case M_NUDGE: {
         const int k = 1 + (int)(r[4] * 2);
-        pos = natural + (float)(r[5] < 0.5f ? -k : k) * g16;
+        pos = base + (float)(r[5] < 0.5f ? -k : k) * g16;
         break;
     }
     case M_JUMP: {
         const int grid = w > 0.5f ? 4 : w > 0.25f ? 2 : 1;
         const int span = 1 + (int)(d * (float)L / (float)(2 * grid));
         const int k = 1 + (int)(r[4] * (float)span);
-        pos = natural + (float)((r[5] < 0.5f ? -k : k) * grid) * g16;
+        pos = base + (float)((r[5] < 0.5f ? -k : k) * grid) * g16;
         break;
     }
-    case M_SCAN: /* the later SC cutters: phrase progress + bar offset + stability, on 16ths */
-        pos = floorf(wrap01(p + floorf((float)c->phrase_idx / 8.0f * 4.0f + 0.5f) / 4.0f + w) * (float)L) * g16;
+    case M_SCAN: { /* a bigger jump within the arrangement: where it reads 1 .. 4 beats away */
+        const int k = (1 + (int)(r[4] * (1 + d * 3))) * (r[5] < 0.5f ? -1 : 1);
+        const int64_t at = (int64_t)s + 8 * k;
+        pos = arranged(at < 0 ? 0u : (uint32_t)at);
         break;
+    }
     case M_REPEAT: {
         static const float divs[] = {4, 6, 8, 3, 12};
         const float interval = beat / divs[(int)(r[4] * 5) % 5];
         const int reps = 1 + (int)(d * 6);
-        hit(c, 0, buf, AMP, 1, 1, reps, interval, natural);
+        hit(c, 0, buf, AMP, 1, 1, reps, interval, base, 1); /* the retriggers don't reopen the gate */
         c->busy_until = c->now + (float)reps * interval;
         c->resume = 1;
         return;
@@ -449,7 +513,7 @@ static void sixteenth(struct cutter* c, int n, int emit) {
         float t = 0;
         const float slow = r[6] < (1 - w) * 0.6f ? (r[7] < 0.5f ? 0.1f : 0.01f + 0.05f * r[8]) : 1;
         for (int k = 0; k < n_rep && t < 2 * beat; ++k) {
-            hit(c, t, buf, AMP, k > 10 ? slow : 1, 1, 0, 0, natural);
+            hit(c, t, buf, AMP, k > 10 ? slow : 1, 1, 0, 0, base, 0);
             t += rd / (1 + c->e.accel * (float)k);
         }
         c->busy_until = c->now + t;
@@ -461,24 +525,24 @@ static void sixteenth(struct cutter* c, int n, int emit) {
         break;
     case M_REVERSE:
         rate = -1;
-        pos = natural + g16;
+        pos = base + g16;
         break;
     case M_FREEZE:
     case M_TAPESTOP: {
         const int len = 1 + (int)(r[4] * (1 + d * 3)); /* 16ths */
-        if (m == M_FREEZE)
-            hit(c, 0, buf, AMP, 0, 1, 0, 0, natural);
+        if (m == M_FREEZE) /* both hold the gate open until they return */
+            hit(c, 0, buf, AMP, 0, 1, 0, 0, base, 1);
         else
             for (int k = 0; k < 8; ++k) {
                 const float x = 1 - (float)k / 8;
                 struct cut_frame* f = k ? frame_at(c, (float)k * (float)len * s16 / 8) : 0;
                 if (!k)
-                    hit(c, 0, buf, AMP, 1, 1, 0, 0, natural);
+                    hit(c, 0, buf, AMP, 1, 1, 0, 0, base, 1);
                 else
                     ev(f, P_RATE, q16(0.02f + 0.98f * x * x));
             }
-        /* back where the loop would be */
-        hit(c, (float)len * s16, buf, AMP, 1, 1, 0, 0, natural + (float)len * g16);
+        /* back on the base, where it is for that step */
+        hit(c, (float)len * s16, buf, AMP, 1, 1, 0, 0, arr ? arranged(s + 2u * (uint32_t)len) : natural + (float)len * g16, 0);
         c->busy_until = c->now + (float)len * s16;
         return;
     }
@@ -491,7 +555,7 @@ static void sixteenth(struct cutter* c, int n, int emit) {
         return;
     }
     }
-    hit(c, 0, buf, AMP, rate, pitch, 0, 0, pos);
+    hit(c, 0, buf, AMP, rate, pitch, 0, 0, pos, 0);
     if (stab > 0) {
         ev(frame_at(c, stab), P_GATEOFF, 0);
         ++c->silences;
@@ -509,7 +573,7 @@ static void step32(struct cutter* c, uint32_t s, int emit) {
     c->have_step = 1;
     if (s & 1)
         return;
-    sixteenth(c, (int)((s % P32) / 2), emit);
+    sixteenth(c, s, (int)((s % P32) / 2), emit);
 }
 
 /* ---- from the FPGA ------------------------------------------------------------------------- */
@@ -517,6 +581,7 @@ static void owner_base(struct cutter* c) {
     struct cut_frame* f = frame_at(c, 0);
     ev(f, P_AMP, 65536); /* unity */
     ev(f, P_ENVHOLD, 0);
+    c->held = 0;
     ev(f, P_BGADVANCE, 0);
     ev(f, P_REPEATS, 0);
     c->last_buf = -1;
@@ -545,10 +610,12 @@ void cut_rx(struct cutter* c, const struct smp_event* e) {
         c->playing = 1;
         c->busy_until = 0;
         c->nq = 0;
+        c->held = -1; /* a cleared queue may have held the return: the next hit says it again */
         break;
     case EV_STOP:
         c->playing = 0;
         c->nq = 0;
+        c->held = -1;
         break;
     case EV_OWNER:
         if (e->a == 0) {
@@ -556,8 +623,10 @@ void cut_rx(struct cutter* c, const struct smp_event* e) {
                 c->n16 = e->value;
             if (e->b && !c->owner)
                 owner_base(c);
-            if (!e->b)
+            if (!e->b) {
                 c->nq = 0;
+                c->held = -1;
+            }
             c->owner = e->b;
         }
         break;
@@ -566,7 +635,7 @@ void cut_rx(struct cutter* c, const struct smp_event* e) {
             c->p.base_buf = e->b;
         break;
     case EV_CC: /* the cutter channel: CC 16.. = the knobs, then phrase bars, section phrases,
-                   silences per phrase and sample switching; mod wheel = release */
+                   silences per phrase, sample switching and the arrangement; mod wheel = release */
         if (e->a >= 16 && e->a < 16 + CK_NUM)
             cut_set_knob(c, e->a - 16, (float)e->b / 127.0f);
         else if (e->a == 16 + CK_NUM)
@@ -577,6 +646,8 @@ void cut_rx(struct cutter* c, const struct smp_event* e) {
             cut_set_silences(c, e->b >= 127 ? -1 : e->b);
         else if (e->a == 19 + CK_NUM)
             cut_set_swap(c, e->b >= 64);
+        else if (e->a == 20 + CK_NUM)
+            cut_set_arrange(c, (float)e->b / 127.0f);
         else if (e->a == 1)
             cut_set_knob(c, CK_RELEASE, (float)e->b / 127.0f);
         break;

@@ -398,10 +398,11 @@ static void md_set_external(int on) {
         return;
     }
     raw_param(0, P_AMP, 65536); /* unity again: a roll the cutter didn't finish can't leave it quieter */
+    raw_param(0, P_ENVHOLD, 0); /* nor a gate it held open for a stutter, freeze or tape stop */
     for (int pi = 0; pi < g_mm.npages; ++pi) /* the controls the cutter overrode come back */
         if (g_mm.page[pi].voice == 0)
             for (int t = 0; t < MT_NUM; ++t)
-                if (g_cutter_owns[t] && g_pg[pi].last[t] >= 0)
+                if ((g_cutter_owns[t] || t == MT_ENVHOLD) && g_pg[pi].last[t] >= 0)
                     apply(pi, t, g_pg[pi].last[t]);
 }
 

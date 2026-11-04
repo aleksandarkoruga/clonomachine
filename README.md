@@ -75,11 +75,18 @@ MIDI channel 7 (`cutterChannel`) goes to it: CC 16.. energy density syncopation 
 character release memory surprise, CC 25 phrase bars (the value, 1..127), CC 26 phrases per
 section (1..8), CC 27 silences per phrase at most (drops and staccato gaps; 0 none, 127 no
 limit, 1 at start-up; a release that drops out keeps one for itself), CC 28 samples (below 64
-only the drum page's, from 64 the cutter may switch; switching at start-up), mod wheel =
-release, notes = presets, pitch bend above the centre = the conductor plays the form. The drum
-page's sample knob (or OSC `/slot/0/bufNum`) picks the cutter's sample; its velocity (volume)
-and gate stay MIDI's, so the gate knob sets how long each cut sounds. After a stutter, a
-ratchet or a silence the loop comes back on the next 16th, at full volume.
+only the drum page's, from 64 the cutter may switch; switching at start-up), CC 29
+arrangement (0 the loop's own order .. 127 every hit from the arrangement; 127 at start-up),
+mod wheel = release, notes = presets, pitch bend above the centre = the conductor plays the
+form. The core is the SC cutters' arrangement: every hit reads from (progress + bar offset +
+metric stability) rounded to 1/16 of the buffer, so the loop's pieces come in a new order, and
+the cuts act on that. Hits come from the SC pattern generator: density hits, the bits of an
+intensity number (the syncopation knob, randomised within its step) on the 16ths in
+bit-reversal order (downbeat, half bar, quarters, 8ths, 16ths). The drum page's sample knob
+(or OSC `/slot/0/bufNum`) picks the cutter's sample; its velocity (volume) and gate stay
+MIDI's, so the gate knob sets how long each cut sounds; stutters, freezes and tape stops hold
+the gate open until they return. After a stutter, a ratchet or a silence the arrangement comes
+back on the next 16th, at full volume.
 Presets: straight, edits, jungle, drill, tape, v13, texture.
 
 ## OSC

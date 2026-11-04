@@ -157,7 +157,7 @@ const REVERB_INFO = {
 const CUTTER = [ /* the cutter channel's CC 16.., each 0..127 */
   ["energy", "0 .. 1", "How far the cuts move away from the loop."],
   ["density", "0 .. 1 = 0 .. 16 hits per bar (±40 % per phrase)", "How many 16ths of a bar get a hit."],
-  ["syncopation", "0 .. 1", "0: hits on the strong positions .. 1: on the weak ones."],
+  ["syncopation", "0 .. 1 (the pattern's intensity number, randomised within the knob's step)", "0: hits on the strong positions .. 1: on the weak ones (bit-reversal order: downbeat, half bar, quarters, 8ths, 16ths)."],
   ["anchor", "0 .. 1", "How much a strong position protects the loop from cuts."],
   ["build", "0 .. 1, 0.5 = linear", "Tension over the phrase: 0 rises early, 1 surges late."],
   ["character", "0 edits · 0.33 rolls · 0.66 tape · 1 texture", "Which family of moves the cuts favour."],
@@ -168,6 +168,7 @@ const CUTTER = [ /* the cutter channel's CC 16.., each 0..127 */
   ["phrases / section", "1 .. 8", "Phrases per section of the conductor's form."],
   ["silences", "0 none · 1 .. 126 per phrase · 127 no limit (1 at start-up)", "Most drops and staccato gaps in a phrase; a release that drops out keeps one for itself."],
   ["samples", "< 64 drum page's only · ≥ 64 the cutter may switch", "Whether the cutter only plays the sample the drum page (or OSC) picks, or may swap to its neighbours."],
+  ["arrangement", "0 the loop's own order .. 127 all arranged (127 at start-up)", "How many hits read from the re-arranged loop (progress + bar offset + metric stability) instead of where the loop would be; the cuts act on top."],
 ];
 const CUTTER_MORE = [
   ["mod wheel", "0 .. 127", "Release, like its CC."],

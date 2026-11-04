@@ -70,9 +70,9 @@ int main(int argc, char** argv) {
                         printf(" pos %.3f", f.ev[i].value < 0 ? -1.0 : f.ev[i].value / 1073741824.0);
                     else if (f.ev[i].b == P_TRIG || f.ev[i].b == P_GATEOFF)
                         printf(" %s", pname(f.ev[i].b));
-                    else if (f.ev[i].b == P_BUFNUM || f.ev[i].b == P_REPEATS)
+                    else if (f.ev[i].b == P_BUFNUM || f.ev[i].b == P_REPEATS || f.ev[i].b == P_ENVHOLD)
                         printf(" %s %d", pname(f.ev[i].b), f.ev[i].value);
-                    else if (f.ev[i].b != P_ENVHOLD && f.ev[i].b != P_BGADVANCE)
+                    else if (f.ev[i].b != P_BGADVANCE)
                         printf(" %s %.3f", pname(f.ev[i].b), f.ev[i].value / 65536.0);
                 printf("\n");
             }

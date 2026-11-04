@@ -1,8 +1,11 @@
 /* The break cutter: a procedural engine that cuts voice 0's loop. Portable C (no allocation,
  * floats), shared by the ESP32 firmware and the PC stand-in (host/cutter_live.py).
  *
- * The idea (from a family of SuperCollider break cutters, abstracted): leave the loop alone where
- * the meter is strong and move away from it where the meter is weak and tension is high.
+ * The idea (from a family of SuperCollider break cutters, abstracted): first re-arrange the loop,
+ * every hit reading from a scrambled position (the SC cutters' progress + bar offset + metric
+ * stability, see arranged() in cutter.c; CC 29 blends it with the loop's own order), then leave
+ * that arrangement alone where the meter is strong and cut it up where the meter is weak and
+ * tension is high.
  *
  *   metric weight w   metric stability generalised: sum over the units containing the step
  *                     (8th, beat, bar, phrase) of how early in the unit it sits, weighted by the
@@ -15,17 +18,20 @@
  *   memory            a phrase's dice can be replayed, mutated with the tension
  *   conductor (auto)  moves the knobs through groove / build / peak / break sections
  *
- * Hits fall on 16ths from a pattern per bar: density hits, placed in metric order by the bits
- * of an "intensity" number; syncopation pushes them to the weak positions.
+ * Hits fall on 16ths from a pattern per bar (the SC pattern generator): density hits, the bits of
+ * an intensity number (the syncopation knob, randomised within its step) on the positions in
+ * bit-reversal order, so syncopation pushes them to the weak positions.
  *
  * The FPGA sends a tick every 32nd (EV_TICK), the bpm, start/stop, who owns voice 0 and the
  * sample's length in 16ths, and the MIDI messages of the cutter channel (CC 16.. = the knobs,
  * CC 25 phrase bars 1..127, CC 26 phrases per section 1..8, CC 27 silences per phrase at most
- * (127: no limit), CC 28 samples: below 64 only the drum page's, from 64 the cutter may switch;
+ * (127: no limit), CC 28 samples: below 64 only the drum page's, from 64 the cutter may switch,
+ * CC 29 arrangement: 0 the loop's own order .. 127 every hit from the arrangement (start-up);
  * notes = presets, pitch bend = conductor auto / manual). The cutter answers with frames of
  * EV_RAW_PARAM events for slot 0, some of them delayed (ratchets, tape stops). Gate length and
- * volume stay MIDI's (the drum page): the cutter's staccato only closes a gate early. After a
- * stutter, a ratchet or a silence the loop comes back on the next 16th, at full volume.
+ * volume stay MIDI's (the drum page): the cutter's staccato only closes a gate early, stutters,
+ * freezes and tape stops hold it open until they return. After a stutter, a ratchet or a
+ * silence the arrangement comes back on the next 16th, at full volume.
  */
 #ifndef CUTTER_H
 #define CUTTER_H
@@ -60,6 +66,7 @@ struct cut_params {
     int base_buf;           /* sample in voice 0's bank the cutter plays */
     int max_silences;       /* drops / staccato gaps per phrase, -1: no limit */
     int swap;               /* 1: the cutter may switch samples, 0: only base_buf */
+    float arrange;          /* 0 the loop's own order .. 1 every hit from the arrangement */
 };
 
 #define CUT_MAX_BARS 127   /* phrase length */
@@ -89,7 +96,8 @@ struct cutter {
     uint16_t bar_pattern[CUT_MAX_BARS]; /* hits per bar of the phrase (bit k = 16th k) */
     int cond_state, cond_next;
     double busy_until;         /* a ratchet / tape stop owns the voice until then */
-    int resume;                /* then the loop again, on the next 16th */
+    int resume;                /* then the base again, on the next 16th */
+    int held;                  /* gate hold as last sent: 1 a move holds it, -1 unknown */
     int silences;              /* in this phrase */
     int last_buf;
     float last_rate;
@@ -110,6 +118,7 @@ void cut_set_conductor(struct cutter* c, int on);
 void cut_set_phrase(struct cutter* c, int bars, int sections); /* 0 keeps; from the next phrase */
 void cut_set_silences(struct cutter* c, int n);        /* per phrase at most, < 0: no limit */
 void cut_set_swap(struct cutter* c, int on);           /* 0: only the drum page's sample */
+void cut_set_arrange(struct cutter* c, float v);       /* 0 the loop's own order .. 1 arranged */
 /* the host's clock in seconds: set it before cut_rx, which schedules from it */
 void cut_clock(struct cutter* c, double t);
 /* an event from the FPGA (EV_TICK, EV_BPM, EV_START, EV_STOP, EV_OWNER, EV_LOAD_BUF, the
