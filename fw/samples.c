@@ -789,6 +789,7 @@ static uint8_t g_io[32768] __attribute__((aligned(4)));
 
 static uint32_t g_load_bytes, g_load_ms, g_load_count;
 static uint32_t g_idle_since;
+static uint32_t g_t_read, g_t_copy, g_t_hook; /* this file's time (samples): reads, conversion, hooks */
 
 static int bank_complete(int lib, const struct bank* b) {
     for (int i = 0; i < b->count; ++i)
@@ -933,6 +934,7 @@ static int job_start(void) {
         g_job.normalized = g_normalize && s->peak > 0 && s->peak < 32767;
         g_job.gain = g_job.normalized ? (32767u << 16) / (uint32_t)s->peak : 65536;
         g_job.t0 = now_samples();
+        g_t_read = g_t_copy = g_t_hook = 0;
         g_job_bank = b;
         if (g_sd_verbose)
             printf("[load %s/%s:%d %s%s]\n", L->dir, b->name, idx, s->name, g_job.prio ? " (wanted)" : "");
@@ -940,9 +942,50 @@ static int job_start(void) {
     }
 }
 
+/* A split file's part gets its own gain (32767 / the part's peak, Q16), in place. No sample
+   exceeds the part's peak, so x * g < 2^31: 32-bit products, no saturation, two samples per
+   word; the same values as wav_convert's. o is word aligned. */
+static void part_gain(int16_t* o, uint32_t n, int32_t g) {
+    uint32_t* w = (uint32_t*)o;
+    for (uint32_t i = 0; i < n / 2u; ++i) {
+        const uint32_t v = w[i];
+        const int32_t lo = ((int32_t)(int16_t)v * g + 32768) >> 16, hi = (((int32_t)v >> 16) * g + 32768) >> 16;
+        w[i] = ((uint32_t)lo & 0xFFFFu) | ((uint32_t)hi << 16);
+    }
+    if (n & 1u)
+        o[n - 1] = (int16_t)((o[n - 1] * g + 32768) >> 16);
+}
+
 /* Reads and converts the next chunk of s (frames from done on) to d[done..]; returns the
-   frames converted, 0 at the end or on a read error. */
+   frames converted, 0 at the end or on a read error. Mono 16-bit files (every file the PC
+   tool prepared) go straight from the card into SDRAM by DMA, in chunks that end on 32 KB
+   boundaries of the file (FatFs then reads whole sectors into place, one command per chunk
+   with 16 or 32 KB clusters, also for the parts of a long file); only a part's own gain (split
+   files are normalised per part) is applied in place. sdcard_read flushes the CPU caches. */
 static uint32_t read_chunk(FIL* f, const struct sample* s, volatile int16_t* d, uint32_t done, int32_t gain) {
+    if (s->fmt == WAV_PCM && s->ch == 1 && s->bits == 16 && !(s->data_off & 3)) {
+        const uint32_t at = s->data_off + done * 2u, room = sizeof(g_io) - (at & (sizeof(g_io) - 1u));
+        uint32_t want = (s->frames - done) * 2u;
+        if (want > room)
+            want = room;
+        int16_t* o = (int16_t*)(d + done);
+        UINT n = 0;
+        uint32_t t = now_samples(), t1;
+        if (want && f_read(f, o, want, &n) != FR_OK)
+            n = 0;
+        g_t_read += (t1 = now_samples()) - t;
+        idle_hook();
+        g_t_hook += (t = now_samples()) - t1;
+        const uint32_t got = n / 2u;
+        if (gain != 65536 && got) {
+            part_gain(o, got, gain);
+            g_t_copy += (t1 = now_samples()) - t;
+            idle_hook();
+            g_t_hook += now_samples() - t1;
+        }
+        g_load_bytes += n;
+        return got;
+    }
     const uint32_t bps = s->bits / 8u, fb = bps * s->ch;
     uint32_t want = s->frames - done;
     if (want > sizeof(g_io) / fb)
@@ -950,15 +993,20 @@ static uint32_t read_chunk(FIL* f, const struct sample* s, volatile int16_t* d, 
     while (want > 4 && ((want * fb) & 3)) /* keep reads word aligned (fast DMA path) */
         --want;
     UINT n = 0;
+    uint32_t t = now_samples(), t1;
     if (want && f_read(f, g_io, want * fb, &n) != FR_OK)
         n = 0;
+    g_t_read += (t1 = now_samples()) - t;
     idle_hook();
+    g_t_hook += (t = now_samples()) - t1;
     want = n / fb;
     int16_t* o = (int16_t*)(d + done); /* flushed at finish */
     for (uint32_t i0 = 0; i0 < want; i0 += 4096) { /* 4096-frame slices, hook in between */
         const uint32_t i1 = (want - i0 > 4096) ? i0 + 4096 : want;
         wav_convert(o + i0, g_io + i0 * fb, i1 - i0, s->fmt, s->ch, s->bits, gain);
+        g_t_copy += (t1 = now_samples()) - t;
         idle_hook();
+        g_t_hook += (t = now_samples()) - t1;
     }
     g_load_bytes += n;
     return want;
@@ -991,7 +1039,8 @@ static void job_finish(void) {
     g_load_ms += ms;
     ++g_load_count;
     if (g_sd_verbose)
-        printf("[done %s %lu ms]\n", s->name, (unsigned long)ms);
+        printf("[done %s %lu ms: read %lu, convert %lu, hooks %lu]\n", s->name, (unsigned long)ms,
+               (unsigned long)(g_t_read / 48), (unsigned long)(g_t_copy / 48), (unsigned long)(g_t_hook / 48));
     g_job.active = 0;
     g_job_bank = 0;
 }
