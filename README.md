@@ -153,14 +153,15 @@ channels (mixed to mono), any rate.
   moves to the same sixteenth of the bar in the new loop: switches crossfade, no gap.
 - **Preparing a card on the PC** (faster loads, nothing left to analyse on the board), also
   after adding new samples: `host/prepare_sd.sh /run/media/$USER/FPGA` reports,
-  `... --write` backs the card up to `~/Music/fpga_sd_backup_<date>`, converts every WAV to
+  `... --write` backs the card up to `~/Music/fpga_sd_backup_<date>` (older backups go to
+  the trash: only the newest is kept), converts every WAV to
   mono 16-bit (own rate, normalised) and writes `.smpidx` / `.smptr` with the firmware's own
   code. Drum loops that are not 2^k beats get a fitting whole-beats tempo (`list` shows
   "N beats (PC)"); uncertain ones are listed as "maybe". The script builds the tool itself.
 - **Loudness** (`host/loudness.cpp`, checks: `host/test_loudness.cpp`): the report shows each
   file's loudness (BS.1770 LUFS) and each folder's spread. Files below their folder's target
-  (drums -12, melody -16 LUFS by default, `--target folder=LUFS`) are raised to it: a 3-band
-  compressor and a look-ahead limiter (at most `--limit` dB, default 4) make the room, the peak
+  (drums -12, melody -14 LUFS by default, `--target folder=LUFS`) are raised to it: a 3-band
+  compressor and a look-ahead limiter (at most `--limit` dB, default 6) make the room, the peak
   stays at full scale. Louder files stay as they are (the board would bring a lower peak back
   up). A levelled file carries a `lvl ` chunk after its audio and isn't levelled again;
   `--no-loudness` skips the stage.

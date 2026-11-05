@@ -342,7 +342,7 @@ static FILE* g_csv;
 static bool g_loudness = true;
 static LevelParams g_lp;
 static std::vector<std::pair<std::string, double>> g_targets = {
-    {"drums", -12}, {"melody", -16}, {"bass", -14}, {"kick", -12}};
+    {"drums", -12}, {"melody", -14}, {"bass", -14}, {"kick", -12}};
 
 static double target_of(const std::string& lib) {
     for (const auto& t : g_targets)

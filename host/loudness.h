@@ -29,7 +29,7 @@ struct LevelParams {
     double ratio = 4, knee = 6; // compressor, knee width in dB
     double attack_ms = 12, release_ms = 60, low_release_ms = 120;
     double xover_lo = 120, xover_hi = 2500; // Hz
-    double lim_max = 4;         // dB: the most the limiter may take off a peak
+    double lim_max = 6;         // dB: the most the limiter may take off a peak
     double lim_lookahead_ms = 5, lim_release_ms = 60;
 };
 

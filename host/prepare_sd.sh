@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Prepare a sample card on the PC (host/prepare_sd.cpp): builds the tool when its sources
 # changed, then runs it. With --write the card is backed up first to
-# ~/Music/fpga_sd_backup_<date> (skip with --no-backup), because the WAVs are converted in place.
+# ~/Music/fpga_sd_backup_<date> (skip with --no-backup), because the WAVs are converted in place;
+# once it is verified, older backups go to the trash (only the newest is kept).
 #
 #   host/prepare_sd.sh /run/media/$USER/FPGA                    # report only
 #   host/prepare_sd.sh /run/media/$USER/FPGA --write            # backup, convert, write caches
@@ -42,7 +43,16 @@ if (( WRITE && BACKUP )); then
     DEST=~/Music/fpga_sd_backup_$(date +%F_%H%M)${ONLY:+_$ONLY}
     echo "backing up $SRC to $DEST ..."
     cp -a "$SRC/." "$DEST"
-    diff -rq "$SRC" "$DEST" >/dev/null && echo "backup verified"
+    if ! diff -rq "$SRC" "$DEST" >/dev/null; then
+        echo "backup differs from the card: nothing written"
+        exit 1
+    fi
+    echo "backup verified"
+    for old in ~/Music/fpga_sd_backup_*; do
+        [[ "$old" == "$DEST" || ! -d "$old" ]] && continue
+        echo "older backup $old -> trash"
+        gio trash "$old"
+    done
 fi
 "$BIN" "$CARD" "${ARGS[@]}"
 if (( WRITE )); then
