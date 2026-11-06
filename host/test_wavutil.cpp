@@ -120,6 +120,28 @@ static int synthetic() {
             ok = 0;
         }
     }
+    // split plan: whole up to 60 s, else the fewest equal parts of at most 60 s (and a bank)
+    // that cover the file, the last one ending at its end
+    const struct { uint32_t frames, sr, parts; } plans[] = {
+        {48000u * 60, 48000, 1}, {48000u * 61, 48000, 2},   {44100u * 60, 44100, 1},
+        {13243230, 44100, 6},    {40836600, 44100, 16},     {96000u * 45, 96000, 2}};
+    for (auto& t : plans) {
+        const uint32_t len = wav_split_len(t.frames, t.sr, kMaxFrames);
+        const uint32_t n = len ? wav_split_count(t.frames, len) : 1;
+        int good = n == t.parts;
+        if (len) {
+            good &= len % 64 == 0 && len <= kMaxFrames && len <= t.sr * WAV_SPLIT_SECONDS;
+            for (uint32_t k = 0; k + 1 < n; ++k)
+                good &= wav_split_start(t.frames, len, k + 1) <= wav_split_start(t.frames, len, k) + len;
+            const uint32_t end = wav_split_start(t.frames, len, n - 1) + len;
+            good &= end <= t.frames && end + 4 > t.frames;
+        }
+        if (!good) {
+            std::printf("  split %u frames at %u Hz: %u parts of %u, expected %u   <-- FAIL\n", t.frames, t.sr, n, len,
+                        t.parts);
+            ok = 0;
+        }
+    }
     return ok;
 }
 
@@ -166,7 +188,7 @@ static int real_file(const char* path) {
         return 1;
     }
     const uint32_t fb = uint32_t(ch * bits / 8), frames = len / fb;
-    const uint32_t part = wav_split_len(frames, sr, base, kMaxFrames);
+    const uint32_t part = wav_split_len(frames, sr, kMaxFrames);
     std::printf("%s: fmt %d %d ch %d bit %u Hz, %.1f s", base, fmt, ch, bits, sr, double(frames) / sr);
     if (part) {
         const uint32_t n = wav_split_count(frames, part);

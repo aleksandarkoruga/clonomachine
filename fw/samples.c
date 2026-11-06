@@ -228,7 +228,7 @@ static void split_long(struct lib* L) {
     int out = 0;
     for (int i = 0; i < n; ++i) {
         const struct sample f = L->s[top + i];
-        const uint32_t len = wav_split_len(f.frames, f.sr, f.name, SAMPLE_MAX_FRAMES);
+        const uint32_t len = wav_split_len(f.frames, f.sr, SAMPLE_MAX_FRAMES);
         uint32_t parts = len ? wav_split_count(f.frames, len) : 1;
         const uint32_t room = (uint32_t)(top + i + 1 - out);
         if (parts > room)
@@ -249,7 +249,7 @@ static void split_long(struct lib* L) {
             s->nseg = (uint16_t)parts;
             s->peak = 0; /* per part, cached in .smptr */
             s->bpm_q16 = samples_track_bpm_q16(len, s->sr, &s->beats_log2);
-            s->n16 = 0; /* parts are 2^k beats (bpm_x100 stays for the file's index record) */
+            s->n16 = 0; /* a part's tempo comes from its length (bpm_x100 stays for the file's index record) */
         }
     }
     L->count = out;
@@ -260,14 +260,13 @@ static const char* base_name(const char* p) {
     return sl ? sl + 1 : p;
 }
 
-/* Groups samples [0,n) of a library into banks: subfolders, then size/count packing; the
-   parts of a split file fill banks of their own ("name #first-last"). */
+/* Groups samples [0,n) of a library into banks: subfolders, then size/count packing; every
+   part of a split file gets a bank of its own ("name #k"). */
 static void build_banks(struct lib* L) {
     L->nbanks = 0;
     const uint32_t max_words = BANK_MAX_BYTES / 2;
     char cur[SAMPLE_NAME_LEN] = "";
     struct bank* b = 0;
-    uint32_t cap = BANK_MAX_FILES; /* split file: parts per bank, the same in all its banks */
     for (int i = 0; i < L->count; ++i) {
         struct sample* s = &L->s[i];
         char grp[SAMPLE_NAME_LEN] = "";
@@ -278,15 +277,7 @@ static void build_banks(struct lib* L) {
             memcpy(grp, s->name, (size_t)(sl - s->name));
             grp[sl - s->name] = 0;
         }
-        const uint32_t fp = footprint(s->frames);
-        if (s->nseg > 1 && s->seg == 0) {
-            uint32_t fit = max_words / fp;
-            if (fit > BANK_MAX_FILES)
-                fit = BANK_MAX_FILES;
-            const uint32_t nb = (s->nseg + fit - 1) / fit;
-            cap = (s->nseg + nb - 1) / nb;
-        } else if (s->nseg <= 1)
-            cap = BANK_MAX_FILES;
+        const uint32_t fp = footprint(s->frames), cap = s->nseg > 1 ? 1 : BANK_MAX_FILES;
         if (!b || strcmp(grp, cur) || (uint32_t)b->count >= cap || (b->words && b->words + fp > max_words)) {
             if (L->nbanks == MAX_BANKS_PER_LIB) {
                 L->count = i; /* out of bank slots: ignore the rest */
@@ -303,17 +294,14 @@ static void build_banks(struct lib* L) {
             else if (s->nseg <= 1)
                 snprintf(b->name, sizeof(b->name), "%d", L->nbanks - 1);
         }
-        if (s->nseg > 1) { /* "<stem, 13 chars> #first-last" */
+        if (s->nseg > 1) { /* "<stem, 13 chars> #k" */
             const char* bn = base_name(s->name);
             const char* dot = strrchr(bn, '.');
             size_t stem = dot ? (size_t)(dot - bn) : strlen(bn);
             if (stem > 13)
                 stem = 13;
             memcpy(b->name, bn, stem);
-            if (s->seg == L->s[b->first].seg)
-                snprintf(b->name + stem, sizeof(b->name) - stem, " #%u", s->seg);
-            else
-                snprintf(b->name + stem, sizeof(b->name) - stem, " #%u-%u", L->s[b->first].seg, s->seg);
+            snprintf(b->name + stem, sizeof(b->name) - stem, " #%u", s->seg);
         }
         s->offset = b->words;
         s->ready = 0;

@@ -140,25 +140,22 @@ uint32_t wav_name_bpm_milli(const char* name) {
     return 0;
 }
 
-uint32_t wav_split_len(uint32_t frames, uint32_t sr, const char* name, uint32_t max_frames) {
+uint32_t wav_split_len(uint32_t frames, uint32_t sr, uint32_t max_frames) {
     if ((uint64_t)frames <= (uint64_t)sr * WAV_SPLIT_SECONDS && frames <= max_frames)
         return 0;
-    uint32_t bpm = wav_name_bpm_milli(name);
-    if (!bpm)
-        bpm = WAV_PART_BPM * 1000;
-    uint64_t len = (uint64_t)sr * 60000u * WAV_PART_BEATS / bpm;
-    if (len > max_frames)
-        len = max_frames;
-    len &= ~(uint64_t)63;
-    if (len < 4096)
-        len = 4096;
+    uint64_t most = (uint64_t)sr * WAV_SPLIT_SECONDS;
+    if (most > max_frames)
+        most = max_frames;
+    most &= ~(uint64_t)63;
+    if (most < 4096)
+        most = 4096;
+    const uint64_t n = (frames + most - 1) / most;
+    const uint64_t len = ((frames + n - 1) / n + 63) & ~(uint64_t)63; /* <= most */
     return len < frames ? (uint32_t)len : 0;
 }
 
 uint32_t wav_split_count(uint32_t frames, uint32_t len) {
-    uint32_t n = frames / len;
-    if (frames - n * len >= len / 4)
-        ++n;
+    const uint32_t n = (uint32_t)(((uint64_t)frames + len - 1) / len);
     return n ? n : 1;
 }
 

@@ -141,12 +141,11 @@ channels (mixed to mono), any rate.
   inside it. Program change / `/slot/n/bank` loads the new bank in the background, the
   requested sample first (~0.1–0.3 s), while the old bank keeps playing; the next bank is
   prefetched, so stepping banks upward is usually instant. Loading ~2 MB/s.
-- **Long files are split:** a WAV longer than 60 s (or larger than a bank) becomes 4-bar
-  parts (16 beats at the tempo in the name, `..._128bpm.wav`, else 120 BPM = 8 s), each a
-  sample of its own (`list` shows `name.wav#k`). The parts of a file fill banks of their own
-  (`list 1`: `0014 38-Audio #0-9`, `#10-19`, ...): program change steps through the file,
-  CC1 picks the part. A remainder of at least ¼ part becomes a last part ending at the
-  file end. Constants in `fw/wavutil.h`; `host/test_wavutil.cpp` checks the conversion.
+- **Long files are split:** a WAV longer than 60 s (or larger than a bank) becomes the
+  fewest equal parts of at most 60 s (a 300 s recording: 6 parts of 50 s, the last one ends
+  at the file end), each a sample of its own (`list` shows `name.wav#k`) in a bank of its
+  own (`list 1`: `0014 38-Audio #0`, `#1`, ...): program change steps through the file.
+  Constants in `fw/wavutil.h`; `host/test_wavutil.cpp` checks the conversion and the split.
 - **Index:** `<dir>/.smpidx` caches format, length, BPM, peak per WAV (name + size + date);
   only new or changed files are parsed (731 files index in ~1.2 s).
 - **Seamless switching:** every grain keeps reading the buffer it started in, the playhead

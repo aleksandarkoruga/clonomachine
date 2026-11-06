@@ -496,7 +496,7 @@ static void do_lib(const fs::path& dir, bool write, Totals& tot) {
         const uint32_t F = w.frames,
                        fsize = rewrite ? 44 + F * 2 + (levelled ? uint32_t(sizeof(mk)) : 0) : uint32_t(fsize0);
         tot.after += fsize;
-        const uint32_t len = wav_split_len(F, w.sr, name.c_str(), kMaxFrames);
+        const uint32_t len = wav_split_len(F, w.sr, kMaxFrames);
         const uint32_t parts = len ? wav_split_count(F, len) : 1;
 
         IdxRec r{};
