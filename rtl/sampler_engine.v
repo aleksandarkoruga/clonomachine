@@ -9,7 +9,7 @@
 //   req_*   cache-line read requests: 64 consecutive 16-bit words from req_addr
 //   fill_*  line data, returned in request order, 64 words per request, never stalled
 //   out_*   one mono s24 sample (Q8 sample units) per sample period
-//   stat_*  status words, streamed out while idle (into a dual-clock RAM)
+//   stat_*  status words, streamed out one per cycle (into a dual-clock RAM)
 //
 // Phase vocoder (rtl/pv_unit.v) per slot, selected by ALGO: every slot output is delayed
 // by SMP_LATENCY samples and crossfaded between the grain path and the PV path (see
@@ -242,8 +242,14 @@ module sampler_engine #(
     reg  [5:0]  f_cnt;
     reg  [1:0]  seqr [0:NG*2-1];
     reg         vld  [0:NG*2-1];
-    wire [GW+2:0] pf_head = pfifo[pf_rp];
     wire        pend_ok = pf_cnt < PD - 2;
+    // Timing: the head entry and its sequence check are registered. pf_rp moves only when a
+    // line completes, so the head is read at the address pf_rp has next cycle: it is current
+    // from a line's first word on (its request was written long before the data arrives).
+    // pf_seq_ok is the completion test of the next cycle, seqr[head] == head seq, computed one
+    // cycle early, including a request for that way in this cycle (seqr then moves on by 1).
+    reg  [GW+2:0] pf_head;                   // pfifo[pf_rp]
+    reg         pf_seq_ok;
 
     // ------------------------------------------------------------------ FSM
     localparam
@@ -262,7 +268,8 @@ module sampler_engine #(
         ST_MULW   = 6'd56, ST_E4B    = 6'd58, ST_G1B    = 6'd59, ST_G3B    = 6'd60, ST_SLOT2  = 6'd61,
         ST_PV0    = 6'd43, ST_PVJ    = 6'd44, ST_PVE    = 6'd45, ST_PVM0   = 6'd46, ST_PVM1   = 6'd47,
         ST_PVM2   = 6'd57, ST_PVM3   = 6'd62, ST_PVM4   = 6'd63,
-        ST_FX     = 7'd64, ST_RVW    = 7'd65, ST_RV     = 7'd66;
+        ST_FX     = 7'd64, ST_RVW    = 7'd65, ST_RV     = 7'd66, ST_SLOT1  = 7'd67, ST_TRGA   = 7'd68,
+        ST_AMPA   = 7'd69;
 
     reg  [6:0]  state, mret;
     reg  [1:0]  mcnt;
@@ -279,6 +286,8 @@ module sampler_engine #(
     // per-slot scratch
     reg  [31:0] gmask;
     reg  [55:0] pos_bg;          // effective position of this sample (POS [+ background])
+    reg  [55:0] sl_bg, sl_pin;   // ST_SLOT -> ST_SLOT1: background phasor, pinned POS
+    reg  signed [57:0] sl_pinm;  //   and POS - FRAMES
     reg  [4:0]  gidx;
     reg  signed [41:0] acc;
     reg  signed [23:0] y;
@@ -293,6 +302,8 @@ module sampler_engine #(
     reg  [4:0]  vfree;
     reg  [15:0] frac;
     reg  [32:0] drem;
+    reg  [32:0] trg_n;           // ST_TRGA -> ST_TRG: trigger phase + increment
+    reg  signed [34:0] amp_dq;   // ST_AMPA -> ST_AMP0: gain step
     reg  [4:0]  dcnt;
     reg  signed [16:0] e12;
     reg  [17:0] e0v;
@@ -305,6 +316,16 @@ module sampler_engine #(
     reg  signed [27:0] o1;
     reg  signed [26:0] mix_l, mix_r, mix_fx;
 
+    // The reset port is the OR of the domain reset and a control bit through a CDC
+    // synchroniser. It is registered before it fans out: once for the units, once more for
+    // the engine (a copy with the same input would be merged into one), so the units run
+    // before the engine can address them.
+    reg rst_u = 1'b1, rst_e = 1'b1;
+    always @(posedge clk) begin
+        rst_u <= rst;
+        rst_e <= rst_u;
+    end
+
     // ------------------------------------------------------------------ plate reverb
     // The voices' send mix of sample n goes in after their mix; the plate's sample comes back
     // into the right output at sample n+1 (it runs beside the engine, ~270 cycles).
@@ -315,7 +336,7 @@ module sampler_engine #(
     wire signed [23:0] rv_out;
     wire               rv_busy;
     reverb_unit #(.T0_HEX(RV_T0_HEX), .T1_HEX(RV_T1_HEX)) u_rv (
-        .clk(clk), .rst(rst), .start(rv_start), .in(rv_in), .out(rv_out), .busy(rv_busy),
+        .clk(clk), .rst(rst_u), .start(rv_start), .in(rv_in), .out(rv_out), .busy(rv_busy),
         .we(rv_we), .waddr(rv_waddr), .wdata(rv_wdata));
 
     // grain scratch
@@ -340,8 +361,19 @@ module sampler_engine #(
     reg         e_fresh;
     reg  [5:0]  e_ret;
     reg  [18:0] e_la;
-    reg         e_na, e_nb;
+    reg         e_nb;
     reg  [18:0] e_t0, e_t1;
+    // ST_ENS1 / ST_ENS2 as registered flags, so the request path starts at a flop rather than
+    // at the state decode: e_go1 = ST_ENS1 with line A missing, e_go2 = ST_ENS2 with line B
+    // missing, e_in2 = ST_ENS2
+    reg         e_go1, e_go2, e_in2;
+    // seqr of both ways of e_gid, read in ST_ENS0 (e_gid holds from there; ST_ENS1 writes
+    // only the way that ST_ENS2 does not read)
+    reg  [1:0]  e_sq0, e_sq1;
+    always @(posedge clk) begin
+        e_sq0 <= seqr[{e_gid, 1'b0}];
+        e_sq1 <= seqr[{e_gid, 1'b1}];
+    end
 
 
     // ---- combinational views of the current slot
@@ -378,9 +410,9 @@ module sampler_engine #(
     wire [18:0]  e_tB     = e_fresh ? 19'h7FFFF : (e_b[0] ? e_trow[18:0]  : e_trow[37:19]);
     wire [18:0]  e_lb     = e_la + 19'd1;
 
-    wire   g_req_valid = pend_ok && ((state == ST_ENS1 && e_na) || (state == ST_ENS2 && e_nb));
+    wire   g_req_valid = pend_ok && (e_go1 || e_go2);
     wire [24:0] g_req_addr = {1'b0, e_base}
-                     + {((state == ST_ENS1) ? e_la : e_lb), 6'd0};
+                     + {(e_in2 ? e_lb : e_la), 6'd0};
     wire   req_fire  = g_req_valid && req_ready;
 
     // ---- request arbitration (grain engine first) and fill routing by tag
@@ -395,8 +427,11 @@ module sampler_engine #(
     wire        tq_head = tagq[tq_rp];
     wire        fill_g  = fill_valid && !tq_head;
     wire        fill_p  = fill_valid && tq_head;
+    wire        fill_last = fill_g && f_cnt == 6'd63;
+    always @(posedge clk)
+        pf_head <= fill_last ? pfifo[pf_rp + 1'b1] : pfifo[pf_rp];
     always @(posedge clk) begin
-        if (rst) begin
+        if (rst_e) begin
             tq_wp <= 0;
             tq_rp <= 0;
             tq_w  <= 0;
@@ -431,7 +466,7 @@ module sampler_engine #(
     wire [31:0]      pv_misses;
     reg  [31:0]      pv_drops;
     pv_unit #(.NS(N_SLOTS), .SB(SLOT_BITS), .SIN_HEX(PV_SIN_HEX), .ATAN_HEX(PV_ATAN_HEX), .WIN_HEX(PV_WIN_HEX)) u_pv (
-        .clk(clk), .rst(rst), .now(samples),
+        .clk(clk), .rst(rst_u), .now(samples),
         .job_valid(pj_valid), .job_ready(pj_ready), .job_slot(pj_slot), .job_clear(pj_clear),
         .job_win(pj_win), .job_reset(pj_reset), .job_notr(pj_notr), .job_c(pj_c), .job_dl(pj_dl),
         .job_ph(pj_ph), .job_ahead(pj_ahead), .job_inc(pj_inc), .job_rate(pj_rate),
@@ -469,12 +504,69 @@ module sampler_engine #(
     reg  signed [67:0] x_p1;
     reg              pj_rs, x_wait;
     reg  [31:0]      pj_c0, pj_stc;
-    wire   req_way   = (state == ST_ENS1) ? e_la[0] : e_lb[0];
+    // Timing: ST_PV0's "next hop due" test, registered. cs, samples and pv_nc[cs] hold from
+    // ST_SLOT (where cs is new) to ST_PV0, so last cycle's value is the one ST_PV0 needs.
+    // The same for its enable and algorithm (r_* change only between samples, pv_alg[cs] only
+    // in ST_PV0), and for ST_HOP1's onset tests: s_active[cs] holds from the grain loop's end to
+    // ST_ALLOC, r2 is drawn in ST_RNG, several cycles before ST_HOP1.
+    reg              pv_due, pv_en, g_room, g_prob;
+    reg  [1:0]       pv_algn;
+    always @(posedge clk) begin
+        pv_due  <= $signed(samples - (pv_nc[cs] - 32'd1024 - 32'd512)) >= 0;
+        pv_en   <= c_ctrl[0] && c_frames >= 24'd128;
+        pv_algn <= (c_ctrl[0] && c_frames >= 24'd128) ? r_algosel[cs][1:0] : 2'd0;
+        g_room  <= ~s_active[cs] != 32'd0 && popcount32(s_active[cs]) < r_maxg[cs];
+        g_prob  <= r_prob[cs] > {1'b0, r2[31:16]};
+    end
+    wire   req_way   = e_la[0] ^ e_in2;        // e_lb = e_la + 1
+    wire [1:0] req_seq = req_way ? e_sq1 : e_sq0;
 
-    assign cmd_ready = (state == ST_IDLE);
+    assign cmd_ready = (state == ST_IDLE) && !rst_u && !rst_e;   // none taken while held in reset
     assign tick_out  = (tick_cnt == CYCLES_PER_SAMPLE - 1);
 
     wire [13:0] c_int = r_interval[cs];
+
+    // Status words, streamed into the status RAM one per cycle round the 64 addresses. A word
+    // is formed over two register stages (slot word and popcount, then the pick), so its
+    // address leads the write by two; a word is a few cycles old when it is written.
+    reg  [5:0]  st_a0, st_a1;
+    reg  [5:0]  st_pc;
+    reg  [31:0] st_w;
+    always @(posedge clk) begin : stat_stream
+        reg [2:0] ss;
+        ss = st_a0[5:3];
+        st_a0 <= st_a0 + 1'b1;
+        st_a1 <= st_a0;
+        st_pc <= popcount32(s_active[ss]);
+        st_w  <= 32'd0;
+        if (st_a0 < 56) begin
+            if (ss < N_SLOTS) begin
+                case (st_a0[2:0])
+                3'd0: st_w <= s_phasor[ss][55:24];
+                3'd2: st_w <= {29'd0, s_gst[ss]};
+                3'd3: st_w <= {16'd0, s_miss[ss]};
+                3'd4: st_w <= {8'd0, s_out[ss]};
+                3'd5: st_w <= {(pv_x[ss] > 17'd65535) ? 16'hFFFF : pv_x[ss][15:0], 15'd0, pv_act[ss]};
+                default: ;
+                endcase
+            end
+        end else begin
+            case (st_a0)
+            6'd56: st_w <= {16'd0, cyc_max};
+            6'd57: st_w <= {16'd0, cyc_last};
+            6'd58: st_w <= beat[63:32];
+            6'd59: st_w <= beat[31:0];
+            6'd60: st_w <= samples;
+            6'd61: st_w <= req_drops;
+            6'd62: st_w <= pv_misses + pv_drops;
+            6'd63: st_w <= 32'h534D504C;
+            default: ;
+            endcase
+        end
+        stat_we   <= 1'b1;
+        stat_addr <= st_a1;
+        stat_data <= (st_a1 < 56 && st_a1[5:3] < N_SLOTS && st_a1[2:0] == 3'd1) ? {26'd0, st_pc} : st_w;
+    end
 
     integer i;
 
@@ -482,7 +574,6 @@ module sampler_engine #(
         gm_we   <= 1'b0;
         tag_we  <= 1'b0;
         out_stb <= 1'b0;
-        stat_we <= 1'b0;
         rv_start <= 1'b0;
         rv_we    <= 1'b0;
 
@@ -556,47 +647,11 @@ module sampler_engine #(
                 mix_fx    <= 0;
                 state     <= ST_SLOT;
             end
-            // stream status words
-            stat_we   <= 1'b1;
-            stat_addr <= stat_addr + 1'b1;
-            begin : stat_mux
-                reg [5:0] a;
-                reg [2:0] ss;
-                a = stat_addr + 1'b1;
-                ss = a[5:3];
-                stat_data <= 32'd0;
-                if (a < 56) begin
-                    if (ss < N_SLOTS) begin
-                        case (a[2:0])
-                        3'd0: stat_data <= s_phasor[ss][55:24];
-                        3'd1: stat_data <= {26'd0, popcount32(s_active[ss])};
-                        3'd2: stat_data <= {29'd0, s_gst[ss]};
-                        3'd3: stat_data <= {16'd0, s_miss[ss]};
-                        3'd4: stat_data <= {8'd0, s_out[ss]};
-                        3'd5: stat_data <= {(pv_x[ss] > 17'd65535) ? 16'hFFFF : pv_x[ss][15:0], 15'd0, pv_act[ss]};
-                        default: ;
-                        endcase
-                    end
-                end else begin
-                    case (a)
-                    6'd56: stat_data <= {16'd0, cyc_max};
-                    6'd57: stat_data <= {16'd0, cyc_last};
-                    6'd58: stat_data <= beat[63:32];
-                    6'd59: stat_data <= beat[31:0];
-                    6'd60: stat_data <= samples;
-                    6'd61: stat_data <= req_drops;
-                    6'd62: stat_data <= pv_misses + pv_drops;
-                    6'd63: stat_data <= 32'h534D504C;
-                    default: ;
-                    endcase
-                end
-            end
         end
 
         // ============================================================== slot start
-        ST_SLOT: begin : slot          // background phasor + effective position
+        ST_SLOT: begin : slot          // background phasor (the position follows in ST_SLOT1)
             reg [55:0] bg;
-            reg [56:0] pb;
             stb            <= pend_stb[cs];
             pend_stb[cs]   <= 5'd0;
             acc            <= 0;
@@ -605,12 +660,6 @@ module sampler_engine #(
                 bg = 56'd0;
             if (bg >= {c_frames, 32'd0})         // buffer switched to a shorter one
                 bg = 56'd0;
-            pb = {1'b0, c_pinned};
-            if (c_ctrl[3]) begin                 // POS_BG: (POS + background) mod FRAMES
-                pb = pb + {1'b0, bg};
-                if (pb >= {1'b0, c_frames, 32'd0})
-                    pb = pb - {1'b0, c_frames, 32'd0};
-            end
             if (!c_ctrl[0] || c_frames < 24'd128) begin
                 s_gst[cs] <= 0;
                 gq        <= 24'sd0;
@@ -618,9 +667,19 @@ module sampler_engine #(
                 state     <= ST_PV0;
             end else begin
                 s_bgph[cs] <= bg;
-                pos_bg     <= pb[55:0];
-                state      <= ST_SLOT2;
+                sl_bg      <= bg;
+                sl_pin     <= c_pinned;
+                sl_pinm    <= $signed({2'b00, c_pinned}) - c_FQ;
+                state      <= ST_SLOT1;
             end
+        end
+        ST_SLOT1: begin : slot1        // effective position: POS_BG ? (POS + background) mod FRAMES : POS
+            reg [56:0] pa;
+            reg signed [57:0] pw;
+            pa = {1'b0, sl_pin} + {1'b0, sl_bg};
+            pw = sl_pinm + $signed({2'b00, sl_bg});     // pa - FRAMES (both below FRAMES: one wrap at most)
+            pos_bg <= !c_ctrl[3] ? sl_pin : (pw >= 0) ? pw[55:0] : pa[55:0];
+            state  <= ST_SLOT2;
         end
         ST_SLOT2: begin : slot2        // stutter pulses, trig latch, playhead
             reg        rt;
@@ -662,7 +721,7 @@ module sampler_engine #(
         // ============================================================== grain loop
         ST_GNEXT: begin
             if (gmask == 32'd0)
-                state <= ST_AMP0;
+                state <= ST_AMPA;
             else begin
                 gidx  <= lowest_one(gmask);
                 gmask <= gmask & (gmask - 1);
@@ -744,7 +803,7 @@ module sampler_engine #(
         // ============================================================== ensure lines
         ST_ENS0: begin
             e_la <= e_b[18:0];
-            e_na <= e_tA != e_b[18:0];
+            e_go1 <= e_tA != e_b[18:0];
             e_nb <= e_tB != (e_b[18:0] + 19'd1);
             if (e_b[0]) begin
                 e_t1 <= e_tA;
@@ -759,7 +818,10 @@ module sampler_engine #(
                 state <= ST_ENS1;
         end
         ST_ENS1, ST_ENS2: begin
-            if ((state == ST_ENS1 && e_na) || (state == ST_ENS2 && e_nb)) begin
+            e_go1 <= 1'b0;
+            e_go2 <= state == ST_ENS1 && e_nb;
+            e_in2 <= state == ST_ENS1;
+            if (e_go1 || e_go2) begin
                 if (req_fire) begin
                     if (req_way) e_t1 <= (state == ST_ENS1) ? e_la : e_lb;
                     else         e_t0 <= (state == ST_ENS1) ? e_la : e_lb;
@@ -776,15 +838,17 @@ module sampler_engine #(
         end
 
         // ============================================================== gain
-        ST_AMP0: begin : amp0
+        ST_AMPA: begin : ampa          // the gain moves 136/65536 of the way to its target
             reg signed [26:0] d;
             reg signed [34:0] dk;
-            reg signed [34:0] dq;
-            reg [24:0] an;
             d  = $signed({2'b00, r_amptgt[cs], 8'd0}) - $signed({2'b00, s_amp[cs]});
             dk = ($signed(d) <<< 7) + ($signed(d) <<< 3);
-            dq = dk >>> 16;
-            an = s_amp[cs] + dq[24:0];
+            amp_dq <= dk >>> 16;
+            state  <= ST_AMP0;
+        end
+        ST_AMP0: begin : amp0
+            reg [24:0] an;
+            an = s_amp[cs] + amp_dq[24:0];
             s_amp[cs] <= an;
             ma    <= acc;
             mb    <= $signed({1'b0, an[24:8]});
@@ -817,11 +881,15 @@ module sampler_engine #(
         end
         ST_TI5: begin
             trig_inc <= (mp[67:48] != 0) ? 32'hFFFFFFFF : mp[47:16];
-            state    <= ST_TRG;
+            state    <= ST_TRGA;
+        end
+        ST_TRGA: begin                 // the add on its own cycle (timing): its carry picks ST_TRG's next state
+            trg_n <= {1'b0, s_trigph[cs]} + {1'b0, trig_inc};
+            state <= ST_TRG;
         end
         ST_TRG: begin : trg
             reg [32:0] n;
-            n = {1'b0, s_trigph[cs]} + {1'b0, trig_inc};
+            n = trg_n;
             frac <= 16'd0;
             rcnt <= 2'd0;
             if (trig) begin
@@ -869,8 +937,7 @@ module sampler_engine #(
             hd = mp >>> 15;
             s_hop[cs] <= 17'd65536 + hd[16:0];
             fm    = ~s_active[cs];
-            fire  = (r_prob[cs] > {1'b0, r2[31:16]}) && (fm != 0)
-                    && (popcount32(s_active[cs]) < r_maxg[cs]);
+            fire  = g_prob && g_room;
             vfree <= lowest_one(fm);
             dcnt  <= 5'd0;
             if (!fire)
@@ -1002,30 +1069,30 @@ module sampler_engine #(
 
         // ============================================================== gate env
         ST_ENV: begin : env
-            reg g;
+            // written side by side for timing: the gate's end test reads the count before
+            // the decrement (it ends when the count is at most 1), both level steps are
+            // formed, and the state code tests the level before the step
+            reg g0, g;
             reg [23:0] el;
-            reg [17:0] lv;
-            g  = s_gate[cs];
+            reg [17:0] lv_up, lv_dn;
+            g0 = s_gate[cs] && !stb[1];
             el = s_envleft[cs];
-            if (stb[1]) g = 1'b0;
             if (stb[0]) begin
                 g  = 1'b1;
                 el = r_envdur[cs];
-            end else if (g && !c_ctrl[2]) begin
+            end else if (g0 && !c_ctrl[2]) begin
+                g  = el > 24'd1;
                 if (el != 0) el = el - 1'b1;
-                if (el == 0) g = 1'b0;
-            end
-            if (g) begin
-                lv = {1'b0, s_level[cs]} + 18'd1366;
-                if (lv > 18'd65536) lv = 18'd65536;
-            end else begin
-                lv = (s_level[cs] > 17'd1366) ? {1'b0, s_level[cs]} - 18'd1366 : 18'd0;
-            end
+            end else
+                g  = g0;
+            lv_up = {1'b0, s_level[cs]} + 18'd1366;
+            if (lv_up > 18'd65536) lv_up = 18'd65536;
+            lv_dn = (s_level[cs] > 17'd1366) ? {1'b0, s_level[cs]} - 18'd1366 : 18'd0;
             s_gate[cs]    <= g;
             s_envleft[cs] <= el;
-            s_level[cs]   <= lv[16:0];
-            s_gst[cs]     <= (s_stutleft[cs] != 0) ? 3'd4 : g ? ((lv < 18'd65536) ? 3'd1 : 3'd2)
-                                                  : ((lv != 0) ? 3'd3 : 3'd0);
+            s_level[cs]   <= g ? lv_up[16:0] : lv_dn[16:0];
+            s_gst[cs]     <= (s_stutleft[cs] != 0) ? 3'd4 : g ? ((s_level[cs] < 17'd64170) ? 3'd1 : 3'd2)
+                                                  : ((s_level[cs] > 17'd1366) ? 3'd3 : 3'd0);
             ma    <= {{26{y[23]}}, y};
             mb    <= $signed({2'b00, r_amp[cs]});
             mret  <= ST_OUT0;
@@ -1053,8 +1120,8 @@ module sampler_engine #(
         ST_PV0: begin : pv0
             reg en, act, rs;
             reg [1:0] alg;
-            en  = c_ctrl[0] && c_frames >= 24'd128;
-            alg = en ? r_algosel[cs][1:0] : 2'd0;
+            en  = pv_en;
+            alg = pv_algn;
             act = pv_act[cs];
             rs  = 1'b0;
             x_clr <= 1'b0;
@@ -1081,7 +1148,7 @@ module sampler_engine #(
             if (rs) begin
                 x_nj <= 2'd3;
                 pv_nc[cs] <= samples + 32'd128 + 32'd1536;
-            end else if (act && $signed(samples - (pv_nc[cs] - 32'd1024 - 32'd512)) >= 0) begin
+            end else if (act && pv_due) begin
                 x_nj <= 2'd1;
                 pv_nc[cs] <= pv_nc[cs] + 32'd512;
             end else
@@ -1282,12 +1349,14 @@ module sampler_engine #(
             f_cnt <= f_cnt + 1'b1;
         end
         // seq/valid bookkeeping: request (clears) has priority over completion (sets)
-        if (fill_g && f_cnt == 6'd63 && seqr[pf_head[GW+2:2]] == pf_head[1:0])
+        pf_seq_ok <= (req_fire && {e_gid, req_way} == pf_head[GW+2:2]) ? seqr[pf_head[GW+2:2]] + 2'd1 == pf_head[1:0]
+                                                                         : seqr[pf_head[GW+2:2]] == pf_head[1:0];
+        if (fill_last && pf_seq_ok)
             vld[pf_head[GW+2:2]] <= 1'b1;
         if (req_fire) begin
-            seqr[{e_gid, req_way}] <= seqr[{e_gid, req_way}] + 1'b1;
+            seqr[{e_gid, req_way}] <= req_seq + 2'd1;
             vld[{e_gid, req_way}]  <= 1'b0;
-            pfifo[pf_wp] <= {e_gid, req_way, seqr[{e_gid, req_way}] + 2'd1};
+            pfifo[pf_wp] <= {e_gid, req_way, req_seq + 2'd1};
             pf_wp <= pf_wp + 1'b1;
         end
         // a freshly allocated grain must not see stale lines
@@ -1295,11 +1364,11 @@ module sampler_engine #(
             vld[{cs, vfree[4:0], 1'b0}] <= 1'b0;
             vld[{cs, vfree[4:0], 1'b1}] <= 1'b0;
         end
-        if (fill_g && f_cnt == 6'd63)
+        if (fill_last)
             pf_rp <= pf_rp + 1'b1;
-        pf_cnt <= pf_cnt + (req_fire ? 7'd1 : 7'd0) - ((fill_g && f_cnt == 6'd63) ? 7'd1 : 7'd0);
+        pf_cnt <= pf_cnt + (req_fire ? 7'd1 : 7'd0) - (fill_last ? 7'd1 : 7'd0);
 
-        if (rst) begin
+        if (rst_e) begin
             state     <= ST_IDLE;
             tick_cnt  <= 0;
             tick_pend <= 1'b0;
@@ -1314,7 +1383,6 @@ module sampler_engine #(
             em_req    <= 1'b0;
             dl_we     <= 1'b0;
             mcnt      <= 0;
-            stat_addr <= 0;
             g_master  <= 16'd4096;
             g_revret  <= 16'd0;
             g_beatinc <= 0;
@@ -1323,6 +1391,9 @@ module sampler_engine #(
             pf_cnt    <= 0;
             f_cnt     <= 0;
             cs        <= 0;
+            e_go1     <= 1'b0;
+            e_go2     <= 1'b0;
+            e_in2     <= 1'b0;
             for (i = 0; i < NG * 2; i = i + 1) begin
                 vld[i]  <= 1'b0;
                 seqr[i] <= 2'd0;

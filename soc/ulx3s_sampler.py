@@ -195,9 +195,10 @@ def main():
         help="MT48LC16M16 / IS42S16160 (32 MB) or AS4C32M16 (64 MB, ULX3S v3.1.x)")
     parser.add_target_argument("--n-slots",      default=3, type=int)
     parser.add_target_argument("--flash",        action="store_true", help="Write the bitstream to SPI flash.")
-    # seed 4 (audio 58.6 / sys 49.7 MHz at 45 MHz). After the engine pipelining every seed
-    # of a sweep passed with >= 10 % margin, so the seed is no longer critical
-    parser.set_defaults(cpu_type="vexriscv", cpu_variant="standard", output_dir="build/ulx3s_sampler", nextpnr_seed=4)
+    # seed 9 (audio 62.4 / sys 49.4 MHz at 45 MHz). With the engine, PV and plate pipelined
+    # a 9-seed sweep gave audio 55.3-57.5 MHz (>= 12 % over 49.15), sys 45.6-49.6
+    # (scripts/seed_sweep.sh), so the seed is no longer critical
+    parser.set_defaults(cpu_type="vexriscv", cpu_variant="standard", output_dir="build/ulx3s_sampler", nextpnr_seed=9)
     args = parser.parse_args()
 
     soc = SamplerSoC(

@@ -110,9 +110,11 @@ module reverb_unit #(
     end
 
     // ------------------------------------------------------------------ FSM
-    localparam S_IDLE = 3'd0, S_PRE = 3'd1, S_RAIL = 3'd2, S_JUNC = 3'd3, S_JIN = 3'd4, S_SCAT = 3'd5;
+    localparam S_IDLE = 3'd0, S_PRE = 3'd1, S_RAIL = 3'd2, S_JUNC = 3'd3, S_JIN = 3'd4, S_SCAT = 3'd5,
+               S_SCAT0 = 3'd6;
     reg [2:0]  state;
     reg [3:0]  r;              // rail; in S_SCAT the write index
+    reg [3:0]  rs;             // S_SCAT: the index whose value is formed (one ahead of r)
     reg [3:0]  st;             // cycle within a rail / the pre-roll
     reg [10:0] w;
     reg [7:0]  cnt;
@@ -125,12 +127,12 @@ module reverb_unit #(
     reg signed [42:0] acc;
     assign busy = (state != S_IDLE) || start;
 
-    wire [3:0] wj = {r[3:2], 2'b00};   // scatter: the junction's first rail
-    wire [1:0] jj = r[3:2];
-    reg signed [24:0] sv;              // scatter value p - wave
+    wire [3:0] wj = {rs[3:2], 2'b00};  // scatter: the junction's first rail
+    wire [1:0] jj = rs[3:2];
+    reg signed [24:0] sv, sv_q;        // scatter value p - wave (sv_q: registered, for r)
     reg [31:0] rn;
     always @(*) begin
-        case (r[1:0])
+        case (rs[1:0])
         2'd0: sv = $signed(p[jj ^ 2'd1]) - $signed(wave[wj + 4'd2]);
         2'd1: sv = $signed(p[jj ^ 2'd2]) - $signed(wave[wj + 4'd3]);
         2'd2: sv = $signed(p[jj])        - $signed(wave[wj + 4'd0]);
@@ -261,13 +263,21 @@ module reverb_unit #(
         S_JIN: begin
             p[0]  <= sat24($signed(p[0]) + $signed(inq));
             r     <= 4'd0;
+            rs    <= 4'd0;
+            state <= S_SCAT0;
+        end
+        S_SCAT0: begin                         // the first scatter value
+            sv_q  <= sv;
+            rs    <= rs + 1'b1;
             state <= S_SCAT;
         end
         S_SCAT: begin                          // ring writes, stochastic rounding 24 -> 18 bits
+            sv_q   <= sv;
+            rs     <= rs + 1'b1;
             rng    <= rn;
             ram_we <= 1'b1;
             ram_wa <= {r, w - 11'd1};
-            ram_wd <= sat18(($signed({{7{sv[24]}}, sv}) + $signed({26'd0, rn[31:26]})) >>> 6);
+            ram_wd <= sat18(($signed({{7{sv_q[24]}}, sv_q}) + $signed({26'd0, rn[31:26]})) >>> 6);
             r      <= r + 1'b1;
             if (r == 4'd15) begin
                 out   <= sat24(($signed(p[3]) + $signed(p[1]) + 48'sd1) >>> 1);

@@ -296,6 +296,7 @@ module pv_unit #(
 
     // lazy ring clearing
     reg  [31:0] clp   [0:NS-1];         // entries for samples < clp are cleared
+    reg  [31:0] cj;                     // P_CATCH: clp[js]
     reg  [SB-1:0] clr_rr;
     reg  [2:0]  clr_n [0:NS-1];         // clear jobs queued or running
     genvar gs;
@@ -649,6 +650,7 @@ module pv_unit #(
     reg  [11:0] q;
     reg  [6:0]  a0v, a0b;
     reg  [11:0] a0k [0:6];
+    reg  [1:0]  a0s [0:1];              // FFT bank of the element read (bsel of its address)
     reg  signed [47:0] a0_sxr, a0_sxi, a0_syr, a0_syi, a0_snr, a0_sni;
     reg  signed [27:0] a0e_r [0:2];
     reg  signed [27:0] a0e_i [0:2];
@@ -726,6 +728,7 @@ module pv_unit #(
                 {jclear, jwin, jreset, jnotr, jc, jdl, jph, jahead, jinc, jrate, jbase, jframes}
                     <= jq[pick_r*QD + jq_rp[pick_r]];
                 js <= pick_r;
+                cj <= clp[pick_r];
                 jq_rp[pick_r] <= jq_rp[pick_r] + 1'b1;
                 ph <= P_CATCH;
                 t13 <= 0;
@@ -741,14 +744,15 @@ module pv_unit #(
             end
             P_CATCH: begin
                 // all played entries of this slot are cleared before its ring is written
-                if ($signed(now - clp[js]) > 0 && t13 != 13'd4096) begin
+                if ($signed(now - cj) > 0 && t13 != 13'd4096) begin
                     rg_we <= 1;
-                    rg_wa <= {js, clp[js][11:0]};
+                    rg_wa <= {js, cj[11:0]};
                     rg_wd <= 0;
-                    clp[js] <= clp[js] + 1'b1;
+                    clp[js] <= cj + 1'b1;
+                    cj <= cj + 1'b1;
                     t13 <= t13 + 1'b1;
                 end else begin
-                    if ($signed(now - clp[js]) > 0)
+                    if ($signed(now - cj) > 0)
                         clp[js] <= now;      // more than a whole ring behind: all cleared
                     ph <= P_TAKE;
                 end
@@ -1123,6 +1127,7 @@ module pv_unit #(
                 a0b <= {a0b[5:0], 1'b0};
                 for (ii = 1; ii < 7; ii = ii + 1)
                     a0k[ii] <= a0k[ii-1];
+                a0s[1] <= a0s[0];
                 if (q < 12'd2050) begin : a0iss
                     reg [10:0] kk, la;
                     kk = q[11:1];
@@ -1133,14 +1138,13 @@ module pv_unit #(
                     a0v[0] <= 1;
                     a0b[0] <= q[0];
                     a0k[0] <= q[11:1];
+                    a0s[0] <= bsel(la);
                     q <= q + 1'b1;
                 end
                 if (a0v[1]) begin : a0d
-                    reg [10:0] la;
                     reg signed [DW-1:0] zr_, zi_;
-                    la = a0b[1] ? rev11(11'd0 - a0k[1][10:0]) : rev11(a0k[1][10:0]);
-                    zr_ = bk_q[bsel(la)][53:27];
-                    zi_ = bk_q[bsel(la)][26:0];
+                    zr_ = bk_q[a0s[1]][53:27];
+                    zi_ = bk_q[a0s[1]][26:0];
                     if (!a0b[1]) begin
                         a_ar <= zr_;
                         a_ai <= zi_;
