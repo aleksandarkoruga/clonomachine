@@ -1,0 +1,14 @@
+# Table scan: osc A on the built-in basic shapes (sine -> triangle -> saw -> square), the
+# position swept by LFO 1, a low and a high note, then a chord. No filter.
+bpm 120
+set tableA basic
+set a_pos 0
+set env1_r 0.2
+set lfo1_shape 1
+set lfo1_rate 0.25
+mod lfo1 a_pos 1
+note 0 33 4
+note 4 81 4
+note 8 45 4
+note 8 52 4
+note 8 57 4

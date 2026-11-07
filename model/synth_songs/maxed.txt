@@ -1,0 +1,56 @@
+# Everything on at once, for the cost counters: a 3-note chord held, both oscillators with
+# 4-voice stereo unison and smooth table interpolation, two warps each (A: bend + FM from B,
+# B: sync + asym), sub and noise, the quad morph filter with its four heaviest ported models
+# (TB-303, Moog, SEM, MS-20) on a stereo voice, LFOs moving positions, warps and the morph.
+bpm 128
+set volume 0.06
+set tableA formant
+set tableB basic
+set a_unison 4
+set a_detune 0.4
+set a_smooth 1
+set a_warp 3
+set a_warp_amt 0.3
+set a_warp2 14
+set a_warp2_amt 0.2
+set b_on 1
+set b_unison 4
+set b_detune 0.3
+set b_smooth 1
+set b_oct -1
+set b_warp 1
+set b_warp_amt 0.4
+set b_warp2 7
+set b_warp2_amt 0.3
+set sub_on 1
+set sub_level 0.4
+set noise_on 1
+set noise_level 0.05
+set filt_on 1
+set cutoff 900
+set res 5
+set slot1 2
+set slot2 1
+set slot2_slope 1
+set slot3 3
+set slot4 7
+set lfo1_rate 0.5
+set lfo1_mode 2
+set lfo2_rate 0.75
+set lfo2_mode 2
+set lfo2_shape 0
+set lfo3_rate 0.25
+set lfo3_mode 2
+set lfo4_rate 0.375
+set lfo4_mode 2
+set lfo4_shape 0
+mod lfo1 a_pos 1
+mod lfo2 b_pos 1
+mod lfo3 b_warp_amt 0.5
+mod lfo1 morph_x 1
+mod lfo4 morph_y 1
+mod lfo2 cutoff_oct 2
+set env1_r 0.3
+note 0 45 8
+note 0 52 8
+note 0 57 8

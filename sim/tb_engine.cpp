@@ -101,6 +101,7 @@ static int runScenario(const Scenario& sc, const char* romDir) {
 
     int n = 0, mism = 0, firstBad = -1;
     double errE = 0, sigE = 0;
+    uint64_t nReq = 0, winReq = 0, peakReq = 0;  // SDRAM line requests: total, per 64 samples
     while (n < sc.samples) {
         // drive inputs for this cycle (sampled at the rising edge in tick())
         top->cmd_valid = !cmdq.empty();
@@ -122,7 +123,7 @@ static int runScenario(const Scenario& sc, const char* romDir) {
         const bool fillTaken = top->fill_valid;
         tick();
         if (cmdTaken) cmdq.pop_front();
-        if (reqTaken) reqq.push_back(reqAddr);
+        if (reqTaken) { reqq.push_back(reqAddr); ++nReq; ++winReq; }
         if (fillTaken && ++wordIdx == 64) { wordIdx = 0; reqq.pop_front(); serveAt = -1; }
 
         if (top->out_stb) {
@@ -138,6 +139,7 @@ static int runScenario(const Scenario& sc, const char* romDir) {
             errE += double(rtl - ref) * double(rtl - ref);
             sigE += double(ref) * double(ref);
             ++n;
+            if ((n & 63) == 0) { peakReq = std::max(peakReq, winReq); winReq = 0; }
             w.clear();
             sc.script(n, w);
             for (auto& x : w) { cmdq.push_back(x); model.write(x.addr, x.data); }
@@ -158,6 +160,8 @@ static int runScenario(const Scenario& sc, const char* romDir) {
                 n, mism,
                 mism ? (std::to_string(10 * std::log10(sigE / std::max(errE, 1e-9))) + " dB").c_str() : "exact",
                 st[SMP_SG_CYCLES_MAX], miss, st[SMP_SG_REQ_DROPS], st[SMP_SG_MAGIC]);
+    std::printf("%-22s lines per sample: mean %.2f, peak %.2f (over 64 samples)\n", "", double(nReq) / std::max(n, 1),
+                peakReq / 64.0);
     delete top;
     if (st[SMP_SG_PV_MISSES])
         std::printf("  [%s] phase-vocoder deadline misses / job drops: %u\n", sc.name, st[SMP_SG_PV_MISSES]);

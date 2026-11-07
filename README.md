@@ -22,7 +22,7 @@ revisions in use are pinned in `deps.lock`.
 | `rtl/pv_unit.v` | phase vocoder (Bungee Basic) shared by the slots: FFT, CORDIC, partials, overlap-add rings |
 | `rtl/dsm_dac.v` | 2nd-order ΔΣ → 4-bit R-2R (mode 0) or 1-bit (mode 1), OSR 256; one per jack channel |
 | `rtl/*.hex` | Hann / 2^x / PV sine, CORDIC, synthesis-window ROMs (`scripts/gen_roms.py`) |
-| `model/` | bit-exact C++ golden models (engine, `pv_model`), float references (BufGrainPlay, `pv_float` = Bungee), `pv_render`, `test_pv_engine` |
+| `model/` | bit-exact C++ golden models (engine, `pv_model`), float references (BufGrainPlay, `pv_float` = Bungee), `pv_render`, `test_pv_engine`; the wavetable synth model (`synth_*`, `wt_tables`) |
 | `sim/` | Verilator: RTL vs model (`make run`), PV unit job by job (`make pvrun`), DSM spectrum test |
 | `include/sampler_regs.h` | engine register map (RTL, model, firmware) |
 | `include/sampler_events.h` | 8-byte control events + SLIP/CRC framing + RAW_PARAM ids |
@@ -237,6 +237,21 @@ table.
   switch the new file's own playhead), then the playhead runs at `rate` from there (slow,
   reverse...). Not synced to the bars: a long file plays a different part on every pass.
 
+## Wavetable synth model (not in the gateware)
+
+`model/synth_engine.*` models a planned 3-voice wavetable synth in the style of today's software wavetable synths: 2 wavetable
+oscillators per voice (256 frames x 2048 samples, octave mip levels in SDRAM played from block-RAM
+frame caches, 2x oversampled with an 8-tap sinc read and a half-band decimator), stepped or smooth
+table position, two warp slots per oscillator (sync, bend, asym, PWM, mirror, quantize, odd/even,
+FM/AM/RM between the oscillators), unison, sub, noise, the quad morph filter of
+[QuadMorphFilter](https://github.com/OTODESK4193/QuadMorphFilter) (`model/synth_qmf.h`), 3
+envelopes, 4 LFOs and a mod matrix. It renders a song file (`model/synth_songs/`) twice, as an 8x
+floating-point reference and as the hardware would compute it (word lengths, control rate,
+frame cache and SDRAM traffic), and counts what the hardware version costs:
+
+    model/build_synth.sh
+    build/synth/synth_render model/synth_songs/filter.txt      # -> build/synth/filter_{ref,hw}.wav
+
 ## Board facts (this unit)
 
 ULX3S v3.0.8, LFE5U-85F, SDRAM MT48LC16M16-compatible (32 MB, memtest OK),
@@ -252,4 +267,7 @@ MIT (`LICENSE`), except:
 - the phase-vocoder files derived from [Bungee](https://github.com/bungee-audio-stretch/bungee)
   (`model/pv_float.*`, `model/pv_model.*`, `model/pv_render.cpp`, `rtl/pv_unit.v`): Mozilla
   Public License 2.0, as stated in each file;
-- FatFs in `fw/fatfs/`: its own BSD-style license (ChaN), in the files.
+- FatFs in `fw/fatfs/`: its own BSD-style license (ChaN), in the files;
+- the quad morph filter port `model/synth_qmf.h`, derived from
+  [QuadMorphFilter](https://github.com/OTODESK4193/QuadMorphFilter): GNU AGPL 3.0, as stated in the
+  file (the synth model binary links it).
