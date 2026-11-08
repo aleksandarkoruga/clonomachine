@@ -327,7 +327,8 @@ filter engine 11.9k LUTs, 4 block RAMs and 15 multipliers (62 MHz). Of the 1024 
 the oscillators use 925 with 3 voices x 2 oscillators x unison 4, the filter engine 980 with four
 TB-303 slots. In the full gateware it needs 203 of the 208 block RAMs (with the BIOS built with LTO
 and without its console, which frees 9; the boot sequence stays, the prompt goes) and 92 % of the
-logic; routing then takes 1-2 hours. The USB host's control port sits behind a register stage
+logic; routing then takes 1-2 hours. Seed 1 (the default): audio 55.2 MHz (49.15 needed), sys
+52.0 (45), USB 76.2 (48); 203 / 208 block RAMs, 92 % of the logic, 87 multipliers. The USB host's control port sits behind a register stage
 (`_WbSlice` in `soc/ulx3s_sampler.py`): the shared bus's decode into its clock-crossing inputs had
 become the sys clock's worst path.
 

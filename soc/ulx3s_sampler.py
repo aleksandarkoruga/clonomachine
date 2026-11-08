@@ -230,12 +230,14 @@ def main():
         help="Synth voices (each: two oscillators and a filter lane).")
     # With the synth the design needs 203 of the 208 block RAMs: the BIOS is built with LTO and
     # without its console (that frees 9; the boot sequence, flash or serial, stays, the prompt
-    # goes). Seeds: scripts/seed_sweep.sh (a sweep keeps the routed configs, packed without routing again).
+    # goes). Seed 1: audio 55.2 / sys 52.0 / usb 76.2 MHz (the netlist of commit de82921; others of
+    # that sweep were still routing). Seeds: scripts/seed_sweep.sh (a sweep keeps the routed configs,
+    # which pack into a bitstream without routing again).
     # Without the synth: seed 9 (audio 62.4 / sys 49.4 MHz); a 9-seed sweep gave audio
     # 55.3-57.5 MHz, sys 45.6-49.6. A seed only holds for the netlist it was found on.
     synth = "--no-synth" not in sys.argv
     parser.set_defaults(cpu_type="vexriscv", cpu_variant="standard", output_dir="build/ulx3s_sampler",
-                        **(dict(nextpnr_seed=9, bios_lto=True, bios_console="disable") if synth else
+                        **(dict(nextpnr_seed=1, bios_lto=True, bios_console="disable") if synth else
                            dict(nextpnr_seed=9)))
     args = parser.parse_args()
 
