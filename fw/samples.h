@@ -26,7 +26,11 @@
 #define MAX_PER_LIB       1024
 #define MAX_BANKS_PER_LIB 160
 #define BANK_MAX_FILES    127
-#define BANK_MAX_BYTES    (7u << 20)   /* one bank per pool region: 4 x 7.5 MB in the 30 MB pool */
+#define BANK_MAX_BYTES    (11u << 19)  /* 5.5 MB, one bank per pool region: 4 in the 22 MB pool
+                                          (5 x 6 MB in the 30 MB one without the synth); a 60 s
+                                          part at 48 kHz fits (2,883,328 frames)              */
+#define SYNTH_TABLE_MB    8u           /* a gateware with the synth: its wavetables in the top
+                                          8 MB of the SDRAM (the pool ends below them)         */
 #define SAMPLE_NAME_LEN   80
 #define NOT_RESIDENT      0xFFFFFFFFu
 
@@ -115,6 +119,7 @@ extern void (*samples_drain_hook)(void);
    1 = prefetch target (next bank), 0 = not needed (evictable, requests dropped). */
 int samples_bank_keep(int lib, int bank);
 
+int samples_card_ok(void); /* the SD card is mounted */
 /* Small files on the card (config): bytes read (buf NUL-terminated) / 0 written, -1 on error. */
 int samples_read_file(const char* path, char* buf, int n);
 int samples_write_file(const char* path, const char* buf, int n);

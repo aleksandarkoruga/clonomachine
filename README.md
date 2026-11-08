@@ -21,15 +21,17 @@ revisions in use are pinned in `deps.lock`.
 | `rtl/sampler_engine.v` | audio engine: 3 slots × 32 grains, per-grain SDRAM line cache, gate, stutter, latency line, algorithm crossfade, stereo mixer (per-slot left/right/both) |
 | `rtl/pv_unit.v` | phase vocoder (Bungee Basic) shared by the slots: FFT, CORDIC, partials, overlap-add rings |
 | `rtl/dsm_dac.v` | 2nd-order ΔΣ → 4-bit R-2R (mode 0) or 1-bit (mode 1), OSR 256; one per jack channel |
-| `rtl/synth_*.v`, `rtl/line_arb.v` | wavetable synth prototype (built with `--with-synth` only): oscillators, filter engine, mixer, SDRAM line arbiter |
+| `rtl/synth_*.v`, `rtl/line_arb.v` | wavetable synth (in the default gateware, `--no-synth` leaves it out): oscillators, filter engine, mixer, SDRAM line arbiter |
 | `rtl/*.hex` | Hann / 2^x / PV sine, CORDIC, synthesis-window ROMs, synth tables (`scripts/gen_roms.py`), synth microcode (`scripts/synth_asm.py`) |
 | `model/` | bit-exact C++ golden models (engine, `pv_model`), float references (BufGrainPlay, `pv_float` = Bungee), `pv_render`, `test_pv_engine`; the wavetable synth model (`synth_*`, `wt_tables`) |
 | `sim/` | Verilator: RTL vs model (`make run`), PV unit job by job (`make pvrun`), DSM spectrum test |
 | `include/sampler_regs.h` | engine register map (RTL, model, firmware) |
 | `include/sampler_events.h` | 8-byte control events + SLIP/CRC framing + RAW_PARAM ids |
 | `soc/ulx3s_sampler.py` | LiteX SoC (VexRiscv, SDRAM, SD, SPI flash, on-board ESP32 UART, USB host on US2 (OHCI), sampler) |
-| `fw/` | firmware: SD index + SDRAM cache, tempo/slot logic, USB-MIDI host + MIDI pages (`/midimap.json`), Monomachine map, shell |
-| `host/` | loader, console, flash script, OSC bridge, SuperCollider example |
+| `fw/` | firmware: SD index + SDRAM cache, tempo/slot logic, USB-MIDI host + MIDI pages (`/midimap.json`), Monomachine map, shell; the synth's control (`synth_ctl.c`, `synth_filt_ctl.c`), wavetable levels (`synth_wt.c`), scales and tunings (`scales.c`), its board glue (`synth.c`) |
+| `include/synth_params.h` | the synth's parameters (firmware, MIDI map, OSC bridge, ESP) |
+| `esp/` | the on-board ESP32's MicroPython with our C module: the break cutter (`esp/cutter`), the harmony generator (`esp/harmony`) |
+| `host/` | loader, console, flash script, OSC bridge, SD card and wavetable preparation (`prepare_sd`, `prepare_wt`), MIDI map editor, SuperCollider example |
 
 ## Plate reverb
 
@@ -78,7 +80,9 @@ section (1..8), CC 27 silences per phrase at most (drops and staccato gaps; 0 no
 limit, 1 at start-up; a release that drops out keeps one for itself), CC 28 samples (below 64
 only the drum page's, from 64 the cutter may switch; switching at start-up), CC 29
 arrangement (0 the loop's own order .. 127 every hit from the arrangement; 127 at start-up),
-mod wheel = release, notes = presets, pitch bend above the centre = the conductor plays the
+CC 30 preset (0..127 spread over the presets), mod wheel = release, notes = the rhythmic
+intensity (the note number 0..127 is the syncopation knob: the remaining bars of the phrase take
+it at once, several notes a bar are fine), pitch bend above the centre = the conductor plays the
 form. The core is the SC cutters' arrangement: every hit reads from (progress + bar offset +
 metric stability) rounded to 1/16 of the buffer, so the loop's pieces come in a new order, and
 the cuts act on that. Hits come from the SC pattern generator: density hits, the bits of an
@@ -95,8 +99,11 @@ Presets: straight, edits, jungle, drill, tape, v13, texture.
 Today `host/osc_bridge.py` runs on the PC and turns OSC (UDP 57130) into the board's 8-byte
 control events over the USB console: `/slot/<n>/<param>` (the BufGrainPlay argument names plus
 the sampler's own: `bank`, `algo`, `noteMode`, `fxSend`, `trig`, ...), `/midi/note|noteoff|cc|pc|bend`,
-`/bpm`, `/transport/start|stop`. `host/sampler_example.scd` drives it from SuperCollider; any
-OSC sender (TouchOSC, ...) works the same way.
+`/bpm`, `/transport/start|stop`; the synth: `/synth/<param> <value>` in the parameter's units
+(`/synth/cutoff 800`, `/synth/scale 3`; the names in `include/synth_params.h`, console
+`synth params`), `/synth/note <note> <vel>`, `/synth/degree <degree> <vel>` (a scale degree, 0 =
+the root). `host/sampler_example.scd` drives it from SuperCollider; any OSC sender (TouchOSC,
+...) works the same way.
 
 Planned:
 
@@ -112,7 +119,7 @@ Planned:
 ## Build / run
 
 ```bash
-python soc/ulx3s_sampler.py --build                 # gateware + BIOS (~3 min)
+python soc/ulx3s_sampler.py --build                 # gateware + BIOS (routing 1-2 h; --no-synth: minutes)
 make -C fw                                          # firmware -> fw/sampler.bin
 python host/load_fw.py --bit build/ulx3s_sampler/gateware/radiona_ulx3s.bit -i   # RAM, dev loop
 host/flash.sh [all|bit|fw]                          # SPI flash: boots standalone at power-up
@@ -121,8 +128,11 @@ python host/osc_bridge.py                           # OSC udp:57130 -> board, 1 
 python host/osc_stress.py                           # Monomachine-like load test against the bridge
 python host/console_cmd.py status usb "list 1"      # one-shot console lines (fixed read time each)
 python host/check_wallclock.py                      # board check: bgAdvance = the file's own playhead
+host/prepare_wt.sh /run/media/$USER/FPGA tables/*.wav   # the synth's wavetables onto the card
+host/esp32/build.sh && host/esp32/flash_esp.sh      # the ESP32's firmware (cutter, harmony generator)
 cd sim && make run                                  # RTL == model regression
 cd sim && make pvrun                                # pv_unit == pv_model, job by job, all stages
+cd sim && make synthfw && ./obj_sfw/Vsynth_top      # the synth's firmware driving its RTL
 g++ -O2 -std=c++20 -fwrapv -DPV_RTL_DIR=\"$PWD/rtl\" -o pv_render model/pv_render.cpp model/pv_float.cpp model/pv_model.cpp
 ./pv_render in.wav out_float.wav --speed 0.5 --pitch 3 --loop --fixed out_fpga.wav   # offline PV renders
 ```
@@ -138,10 +148,11 @@ FAT32 or exFAT, MBR or GPT. Folders are libraries: `/drums` → slot 0, `/melody
 channels (mixed to mono), any rate.
 
 - **Banks:** every subfolder is a bank; loose files are packed in name order into banks of
-  ≤ 7 MB / 127 files. A slot's whole bank sits in SDRAM: CC1 / `bufNum` switch instantly
-  inside it. Program change / `/slot/n/bank` loads the new bank in the background, the
-  requested sample first (~0.1–0.3 s), while the old bank keeps playing; the next bank is
-  prefetched, so stepping banks upward is usually instant. Loading ~2 MB/s.
+  ≤ 5.5 MB / 127 files (4 banks resident with the synth, whose wavetables take the top
+  8 MB of the SDRAM; 5 without it). A slot's whole bank sits in SDRAM: CC1 / `bufNum`
+  switch instantly inside it. Program change / `/slot/n/bank` loads the new bank in the
+  background, the requested sample first (~0.1–0.3 s), while the old bank keeps playing; the
+  next bank is prefetched, so stepping banks upward is usually instant. Loading ~2 MB/s.
 - **Long files are split:** a WAV longer than 60 s (or larger than a bank) becomes the
   fewest equal parts of at most 60 s (a 300 s recording: 6 parts of 50 s, the last one ends
   at the file end), each a sample of its own (`list` shows `name.wav#k`) in a bank of its
@@ -184,7 +195,10 @@ up to +12 dB at 127), pitch bend = cutter handover (voice 0) / noteMode (the MD 
 stretcher, aftertouch = grainDur. gate: 1/32 bar .. 16 bars, exponential (64 ~ 3/4 bar), also
 while the cutter plays. `"noteOff": false` on a page: note-offs don't end its gate. `midimap defaults` rewrites the
 file with these (the old one stays as `/midimap.json.bak`). Other channels use the Monomachine
-table.
+table. The synth has a page of its own on **channel 9** (`"synth"`): notes play it, CC 16.. its
+parameters (cutoff res aPos noteOffset mod1Amt fxSend, the envelopes, warps, tables, ... then
+tuning and the harmony generator from CC 64; the editor and `midimap json` show the list), mod
+wheel / aftertouch = mod sources, pitch bend = bend.
 
 - **Clock:** the global bpm follows MIDI clock (least-squares slope over the last 96 ticks,
   ticks the cable lost counted in from the interval, 0.1 bpm steps); `clock 0` turns that off. **Start** restarts the beat and the time `bgAdvance` counts, **Stop**
@@ -253,30 +267,69 @@ frame cache and SDRAM traffic), and counts what the hardware version costs:
     model/build_synth.sh
     build/synth/synth_render model/synth_songs/filter.txt      # -> build/synth/filter_{ref,hw}.wav
 
-## Wavetable synth prototype (RTL, `--with-synth`)
+## Wavetable synth
 
-The model's audio path in hardware, built only with `--with-synth` (the default gateware does not
-contain it). `rtl/synth_osc.v` runs the oscillators as jobs on one datapath: frame caches in
+Three voices, each two wavetable oscillators (unison up to 4, two warps: sync, bend, PWM, asym,
+mirror, flip, quantize, odd/even, FM / AM / RM / thru-zero FM, ...), a sub and noise into a
+quad morph filter (four slots of clean SVF, Moog or TB-303, blended by an XY morph), three
+envelopes, four LFOs and an 8-slot mod matrix; mono / legato / portamento. Played on MIDI
+channel 9 (its page in `/midimap.json`), by OSC (`/synth/...`) or the console (`synth`,
+`synth params`, `synth note 60`, `synth cutoff 800`).
+
+- **Wavetables** are prepared on the PC: `host/prepare_wt.sh <card> [WAVs / folders]` writes
+  the built-ins (basic, saw, square, pwm, sine, formant, fold) and any wavetable WAVs (frames
+  from the `clm ` chunk, else 2048 samples; other sizes resampled, up to 256 frames) as
+  `/wavetables/NN_name.wtl`: their band-limited levels, ready for SDRAM. The card holds as many
+  as you like (128 are indexed); `aTable` / `bTable` pick one by number (the CC value is the
+  index) and it loads in the background while the old one plays, the next one ahead; four stay
+  in the 8 MB. The board only reads them.
+- **Scales:** `scaleMap` on: consecutive MIDI keys are consecutive degrees of `scale` (109: the
+  usual ones, the Arabic maqamat in quarter tones, Partch's) in `tuning` (35: just,
+  Pythagorean, meantones, well temperaments, equal divisions to 53, Partch's 43, the harmonic
+  series, Bohlen-Pierce, Carlos alpha / beta / gamma), key 60 = `root`. A scale uses the tuning
+  when it counts in as many steps, else that many equal steps; the chromatic scales play every
+  step of the tuning. `noteOffset` adds to the incoming note (held notes too): an LFO on its CC
+  is an arpeggiator, in degrees with `scaleMap`.
+- **Harmony generator** (ESP32, beside the cutter; `harmony` on): functional harmony after the
+  SuperCollider HarmonyGenerator: a chain of degrees 1 3 6 (resolution) -> 2 4 (preparation) ->
+  5 7 (tension) that only moves forward (jumps allowed, often staying), a melody grown from a
+  seed by inversion / retrograde / transposition / shuffle / rotation that moves the chords,
+  triads voiced with the least movement and no parallel fifths or octaves, and a cadence at the
+  end of each phrase (authentic, deceptive or half). It sends scale degrees, so the synth's
+  scale and tuning apply; `harmBeats`, `harmPhrase`, `harmOctave`, `harmVoices`, `harmGate`,
+  `harmSeed`. MIDI notes on channel 9 wait while it plays.
+
+The firmware's control runs every 64 samples (integer arithmetic) and writes only the registers
+that change; `sim/tb_synth_fw.cpp` runs it against the RTL in Verilator (pitch, filter, ladders,
+scales, degrees, glide, the budget) and checks its table levels against the model.
+
+### The RTL
+
+The model's audio path in hardware, in the default gateware (`--no-synth` leaves it out: then 5
+sample banks stay resident instead of 4 and the BIOS keeps its console). `rtl/synth_osc.v` runs the oscillators as jobs on one datapath: frame caches in
 block RAM filled from SDRAM through `rtl/line_arb.v` (the sampler engine keeps priority on the line
 queue), the warp ALU, the 8-tap sinc read, sub and noise. `rtl/synth_filt.v` is a microcoded
 engine (programs from `scripts/synth_asm.py`): the four filter slots run as threads, the three
 voices as lanes; clean SVF, TB-303 and Moog so far. `rtl/synth_top.v` adds the voice mixer and the
-half-band decimator. The output is mono, added to the right channel. There is no control yet
-(envelopes, LFOs, mod matrix): the soft core can write every register through `synth_cmd_*`, but
-no firmware does.
+half-band decimator. The output is mono, added to the right channel, and sent to the plate reverb
+(`SMP_G_SYN_SEND`, `fxSend`). Its wavetables live in the top 8 MB of the SDRAM; a write to an
+oscillator's level address drops its cached frames (another table or level never plays stale
+frames), and a note can restart the unison phases (start phase, randomness).
 
     cd sim && make synthosc && ./obj_so/Vsynth_osc     # oscillators vs the model's float read
     cd sim && make synthfilt && ./obj_sf/Vsynth_filt   # filter engine vs a float run of its microcode
     cd sim && make synthtop && ./obj_st/Vsynth_top     # end to end -> build/synth/top_saw110.wav
     scripts/ooc/run.sh scripts/ooc/ooc_osc.v osc rtl/synth_osc.v      # one unit alone: area, Fmax
-    python3 soc/ulx3s_sampler.py --build --with-synth --bios-lto --bios-console disable
+    python3 soc/ulx3s_sampler.py --build [--synth-voices 2]     # the default gateware
 
 Out of context the oscillators take 7.1k LUTs, 15 block RAMs and 17 multipliers (70 MHz), the
 filter engine 11.9k LUTs, 4 block RAMs and 15 multipliers (62 MHz). Of the 1024 cycles per sample,
 the oscillators use 925 with 3 voices x 2 oscillators x unison 4, the filter engine 980 with four
 TB-303 slots. In the full gateware it needs 203 of the 208 block RAMs (with the BIOS built with LTO
 and without its console, which frees 9; the boot sequence stays, the prompt goes) and 92 % of the
-logic; routing then takes more than an hour.
+logic; routing then takes 1-2 hours. The USB host's control port sits behind a register stage
+(`_WbSlice` in `soc/ulx3s_sampler.py`): the shared bus's decode into its clock-crossing inputs had
+become the sys clock's worst path.
 
 ## Board facts (this unit)
 
@@ -297,5 +350,6 @@ MIT (`LICENSE`), except:
 - the quad morph filter port `model/synth_qmf.h`, derived from
   [QuadMorphFilter](https://github.com/OTODESK4193/QuadMorphFilter): GNU AGPL 3.0, as stated in the
   file (the synth model binary links it); likewise the synth microcode `scripts/synth_asm.py` with
-  its output `rtl/sy_ucode.hex` (in a gateware built with `--with-synth`) and
-  `sim/tb_synth_filt.cpp`.
+  its output `rtl/sy_ucode.hex` and `sim/tb_synth_filt.cpp`, and the firmware's coefficient
+  formulas `fw/synth_filt_ctl.c`. The microcode is in the default gateware and the formulas in the
+  firmware, so their bitstream and binary are AGPL too; `--no-synth` builds a gateware without it.

@@ -76,4 +76,26 @@ obj_st/Vsynth_top: $(ST_RTL) tb_synth_top.cpp ../model/synth_ucode.h ../model/wt
 	  -GFFN_HEX='"../rtl/sy_ffn.hex"' -GHB_HEX='"../rtl/sy_hb.hex"' \
 	  -CFLAGS "-std=c++20 -O2" $(ST_RTL) tb_synth_top.cpp ../model/wt_tables.cpp
 synthtop: obj_st/Vsynth_top
-.PHONY: synthtop
+# the same with 2 voices (synth_top NV = 2):  make synthtop2 && ./obj_st2/Vsynth_top
+obj_st2/Vsynth_top: $(ST_RTL) tb_synth_top.cpp ../model/synth_ucode.h ../model/wt_tables.cpp ../model/synth_analysis.h
+	$(VERILATOR) --cc --exe --build -O3 -j 8 --x-assign 0 --x-initial 0 --Mdir obj_st2 --top-module synth_top \
+	  -Wno-fatal -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-UNUSEDPARAM -Wno-BLKSEQ -GNV=2 \
+	  -GSINC_HEX='"../rtl/sy_sinc.hex"' -GFN_HEX='"../rtl/sy_fn.hex"' -GUCODE_HEX='"../rtl/sy_ucode.hex"' \
+	  -GFFN_HEX='"../rtl/sy_ffn.hex"' -GHB_HEX='"../rtl/sy_hb.hex"' \
+	  -CFLAGS "-std=c++20 -O2" $(ST_RTL) tb_synth_top.cpp ../model/wt_tables.cpp
+synthtop2: obj_st2/Vsynth_top
+.PHONY: synthtop synthtop2
+
+# the synth firmware (fw/synth_ctl.c ...) driving rtl/synth_top.v:  make synthfw && ./obj_sfw/Vsynth_top
+SFW_C = synth_ctl.c synth_filt_ctl.c synth_wt.c scales.c
+obj_sfwlib/libsfw.a: $(addprefix ../fw/,$(SFW_C)) ../fw/synth_ctl.h ../fw/synth_wt.h ../fw/scales.h ../fw/synth_ucode.h ../fw/dmath.h ../include/synth_params.h
+	mkdir -p obj_sfwlib && cd obj_sfwlib && gcc -O2 -std=gnu11 -Wall -Wextra -c $(addprefix ../../fw/,$(SFW_C)) && ar rcs libsfw.a $(SFW_C:.c=.o)
+obj_sfw/Vsynth_top: $(ST_RTL) tb_synth_fw.cpp obj_sfwlib/libsfw.a ../model/wt_tables.cpp ../model/wav.h
+	$(VERILATOR) --cc --exe --build -O3 -j 8 --x-assign 0 --x-initial 0 --Mdir obj_sfw --top-module synth_top \
+	  -Wno-fatal -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-UNUSEDPARAM -Wno-BLKSEQ \
+	  -GSINC_HEX='"../rtl/sy_sinc.hex"' -GFN_HEX='"../rtl/sy_fn.hex"' -GUCODE_HEX='"../rtl/sy_ucode.hex"' \
+	  -GFFN_HEX='"../rtl/sy_ffn.hex"' -GHB_HEX='"../rtl/sy_hb.hex"' \
+	  -CFLAGS "-std=c++20 -O2" -LDFLAGS "$(CURDIR)/obj_sfwlib/libsfw.a" $(ST_RTL) tb_synth_fw.cpp ../model/wt_tables.cpp
+synthfw: obj_sfw/Vsynth_top
+.PHONY: synthfw
+

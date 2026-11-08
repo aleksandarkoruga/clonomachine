@@ -3,11 +3,12 @@
 #   offset 0     : bitstream
 #   offset 4 MB  : firmware boot image (length, crc32, sampler.bin) read by the BIOS
 # Usage: host/flash.sh [all|fw|bit]      (default: all)
+#        BIT=<other .bit> FW=<other .bin> host/flash.sh ...   (e.g. a synth build or a fallback)
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/env.sh"
-BIT="$ROOT/build/ulx3s_sampler/gateware/radiona_ulx3s.bit"
-FW="$ROOT/fw/sampler.bin"
+BIT="${BIT:-$ROOT/build/ulx3s_sampler/gateware/radiona_ulx3s.bit}"
+FW="${FW:-$ROOT/fw/sampler.bin}"
 FBI="$ROOT/build/sampler.fbi"
 FW_OFFSET=0x400000   # keep in sync with FW_FLASH_OFFSET in soc/ulx3s_sampler.py
 what="${1:-all}"

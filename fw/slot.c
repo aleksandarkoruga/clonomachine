@@ -14,6 +14,7 @@
  * new loop, so a switch crossfades through the grain overlap without a gap.
  */
 #include "slot.h"
+#include "synth.h"
 
 #include <string.h>
 
@@ -439,4 +440,5 @@ void set_global_bpm(uint32_t bpm_milli) {
     eng_write(SMP_ADDR(SMP_GLOBAL_SLOT, SMP_G_BEAT_INC), (uint32_t)inc);
     for (int s = 0; s < NUM_SLOTS; ++s)
         slot_apply_tempo(s);
+    synth_bpm(bpm_milli); /* synced LFOs */
 }

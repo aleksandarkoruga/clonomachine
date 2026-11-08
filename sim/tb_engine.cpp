@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <functional>
@@ -26,6 +27,7 @@ struct Scenario {
     int latency;      // memory latency in engine cycles
     bool expectExact; // false: memory deliberately too slow, only report
     std::function<void(int n, std::vector<Write>& w)> script;
+    std::function<int32_t(int k)> synth = nullptr;   // the synth's sample k (synth_in), else 0
 };
 
 static std::vector<int16_t> gMem;
@@ -99,6 +101,10 @@ static int runScenario(const Scenario& sc, const char* romDir) {
     sc.script(0, w);
     for (auto& x : w) { cmdq.push_back(x); model.write(x.addr, x.data); }
 
+    // synth_in: sample k appears 140 cycles after tick k (as rtl/synth_top.v delivers it); the
+    // engine latches it at the next tick, so sample n sends the synth's sample n - 1
+    int tickIdx = 0, sinceTick = -1;
+    top->synth_in = 0;
     int n = 0, mism = 0, firstBad = -1;
     double errE = 0, sigE = 0;
     uint64_t nReq = 0, winReq = 0, peakReq = 0;  // SDRAM line requests: total, per 64 samples
@@ -121,7 +127,11 @@ static int runScenario(const Scenario& sc, const char* romDir) {
         const bool reqTaken = top->req_valid && top->req_ready;
         const uint32_t reqAddr = top->req_addr;
         const bool fillTaken = top->fill_valid;
+        const bool tickNow = top->tick_out;
         tick();
+        if (tickNow) { ++tickIdx; sinceTick = 0; }
+        else if (sinceTick >= 0 && ++sinceTick == 140 && sc.synth)
+            top->synth_in = static_cast<uint32_t>(sc.synth(tickIdx - 1)) & 0xFFFFFF;
         if (cmdTaken) cmdq.pop_front();
         if (reqTaken) { reqq.push_back(reqAddr); ++nReq; ++winReq; }
         if (fillTaken && ++wordIdx == 64) { wordIdx = 0; reqq.pop_front(); serveAt = -1; }
@@ -129,6 +139,7 @@ static int runScenario(const Scenario& sc, const char* romDir) {
         if (top->out_stb) {
             const int32_t rtl = static_cast<int32_t>(top->out_l << 8) >> 8;
             const int32_t rtlR = static_cast<int32_t>(top->out_r << 8) >> 8;
+            model.synthIn = (sc.synth && n > 0 && !std::getenv("SYN_MODEL_OFF")) ? sc.synth(n - 1) : 0;
             const int32_t ref = model.step();
             if (rtl != ref || rtlR != model.outR) {
                 if (firstBad < 0) firstBad = n;
@@ -352,6 +363,41 @@ int main(int argc, char** argv) {
             }
         }
     }});
+    {   // the synth's plate send (SYN_SEND): a detuned saw pair as the synth, slot 0 dry on the
+        // left; the send goes up, then off so the tail rings out
+        Scenario sc{"synth_send", 36000, 40, true, [](int n, std::vector<Write>& w) {
+            static rv_ctl ctl;
+            static rv_params p;
+            if (n == 0) {
+                rv_defaults(&p);
+                rv_init(&ctl, 48000, 5, &p);
+                slotSetup(w, 0, gBufA, 0.04, 4, 1.0, 1.0);
+                w.push_back({SMP_ADDR(0, SMP_R_OUT), 1});
+                w.push_back({SMP_ADDR(0, SMP_R_CTRL), SMP_CTRL_ENABLE | SMP_CTRL_ENV_HOLD});
+                w.push_back({SMP_ADDR(0, SMP_R_STROBE), SMP_STROBE_TRIG});
+                w.push_back({SMP_ADDR(SMP_GLOBAL_SLOT, SMP_G_REV_RETURN), 8192});
+                w.push_back({SMP_ADDR(SMP_GLOBAL_SLOT, SMP_G_SYN_SEND), 4096});
+            }
+            if (n == 12000)
+                w.push_back({SMP_ADDR(SMP_GLOBAL_SLOT, SMP_G_SYN_SEND), 12288});
+            if (n == 22000)
+                w.push_back({SMP_ADDR(SMP_GLOBAL_SLOT, SMP_G_SYN_SEND), 0});
+            if (n % 256 == 0) {
+                rv_regs r;
+                rv_block(&ctl, &r);
+                for (int k = 0; k < 16; ++k) {
+                    w.push_back({SMP_ADDR(SMP_REV_PAGE0, k), r.target[k]});
+                    w.push_back({SMP_ADDR(SMP_REV_PAGE0, 16 + k), (uint32_t)r.gain[k]});
+                    w.push_back({SMP_ADDR(SMP_REV_PAGE1, k), (uint32_t)r.pole[k]});
+                }
+            }
+        }};
+        sc.synth = [](int k) {
+            const double t = k / 48000.0, a = t * 110.0, b = t * 110.7;
+            return int32_t(std::lrint(0.3 * 8388608.0 * ((a - std::floor(a)) + (b - std::floor(b)) - 1.0)));
+        };
+        scs.push_back(sc);
+    }
     scs.push_back({"bg_advance", 40000, 40, true, [](int n, std::vector<Write>& w) {
         if (n == 0) {
             slotSetup(w, 0, gBufB, 0.04, 4, 1.0, 1.0);   // melody-style: runs in the background

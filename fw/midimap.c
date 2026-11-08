@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "jsonp.h"
+#include "../include/synth_params.h"
 
 const char* const mm_target_names[MT_NUM] = {
     "none",   "bufNum", "bank",      "rate",        "pitch",    "gate",     "interval",  "amp",
@@ -25,6 +26,45 @@ int rk_of(const char* name) {
         if (name_eq(name, rk_names[t]))
             return t;
     return -1;
+}
+
+#define SY_NAME(id, name, kind, lo, hi, def, mod) #name,
+static const char* const g_syn_names[SP_NUM] = {SYNTH_PARAMS(SY_NAME)};
+#undef SY_NAME
+
+const char* mm_syn_name(int p) {
+    return p == MM_SYN_BEND ? "bend" : (p >= 0 && p < SP_NUM) ? g_syn_names[p] : "none";
+}
+int mm_syn_of(const char* name) {
+    if (name_eq(name, "none"))
+        return MM_SYN_NONE;
+    if (name_eq(name, "bend"))
+        return MM_SYN_BEND;
+    for (int p = 0; p < SP_NUM; ++p)
+        if (name_eq(name, g_syn_names[p]))
+            return p;
+    return -1;
+}
+
+/* the synth on channel 9 (free in the Machinedrum setup): the knobs most played first */
+static void synth_defaults(struct mm_synth* y) {
+    static const uint8_t k[] = {
+        SP_CUTOFF,   SP_RES,      SP_A_POS,     SP_NOTEOFFSET, SP_MOD1AMT,  SP_FXSEND,   SP_ENV1A,    SP_ENV1D,
+        SP_ENV1S,    SP_ENV1R,    SP_ENV2A,     SP_ENV2D,      SP_ENV2S,    SP_ENV2R,    SP_A_WARP,   SP_A_WARPAMT,
+        SP_A_TABLE,  SP_B_ON,     SP_B_TABLE,   SP_B_POS,      SP_B_LEVEL,  SP_B_SEMI,   SP_B_WARP,   SP_B_WARPAMT,
+        SP_A_UNISON, SP_A_DETUNE, SP_SUB_ON,    SP_SUB_LEVEL,  SP_NOISE_ON, SP_NOISE_LEVEL, SP_DRIVE, SP_MORPHX,
+        SP_MORPHY,   SP_SLOT1,    SP_SLOT1TYPE, SP_FILTKEY,    SP_LFO1RATE, SP_MOD2AMT,  SP_LFO2RATE, SP_MOD3AMT,
+        SP_PORTA,    SP_MONO,     SP_LEGATO,    SP_SCALE,      SP_SCALEMAP, SP_ROOT,     SP_VOLUME,   SP_ARPRETRIG,
+        SP_TUNING,   SP_HARMONY,  SP_HARMBEATS, SP_HARMPHRASE, SP_HARMOCTAVE, SP_HARMVOICES, SP_HARMGATE, SP_HARMMELODY,
+        SP_HARMSEED};
+    memset(y, 0, sizeof(*y));
+    y->chan = 8; /* channel 9 */
+    y->cc = 16;
+    y->nknobs = sizeof(k);
+    memcpy(y->knobs, k, sizeof(k));
+    y->mw = SP_MODWHEEL;
+    y->at = SP_AFTERTOUCH;
+    y->pb = MM_SYN_BEND;
 }
 
 static void reverb_defaults(struct mm_reverb* r) {
@@ -74,6 +114,7 @@ void midimap_defaults(struct midimap* m) {
     m->clock_follow = 1;
     m->cutter_chan = 7; /* the cutter's structure controls (on the ESP) */
     reverb_defaults(&m->reverb);
+    synth_defaults(&m->synth);
     page_init(&m->page[0], 5, 0, 16, 0, 4, MT_CUTTER);    /* Machinedrum MIDI machine on channel 5: drums */
     page_init(&m->page[1], 3, 1, 16, -2, 2, MT_NOTEMODE); /* channel 3: melody */
     page_init(&m->page[2], 6, 2, 25, -2, 2, MT_NOTEMODE); /* channel 6: third voice */
@@ -149,6 +190,61 @@ static int parse_reverb(struct json* j, struct mm_reverb* r, char* err, int errn
     return 1;
 }
 
+static int syn_target(struct json* j, uint8_t* out, char* err, int errn) {
+    char s[24];
+    if (!json_string(j, s, sizeof(s)))
+        return 0;
+    const int t = mm_syn_of(s);
+    if (t < 0) {
+        snprintf(err, (size_t)errn, "unknown synth parameter \"%s\"", s);
+        j->err = 1;
+        return 0;
+    }
+    *out = (uint8_t)t;
+    return 1;
+}
+
+static int parse_synth(struct json* j, struct mm_synth* y, char* err, int errn) {
+    char key[24];
+    int first = 1, chan = 9, cc = 16;
+    while (json_member(j, &first, key, sizeof(key))) {
+        if (name_eq(key, "channel"))
+            json_int(j, &chan);
+        else if (name_eq(key, "cc"))
+            json_int(j, &cc);
+        else if (name_eq(key, "knobs")) {
+            int f = 1;
+            y->nknobs = 0;
+            while (json_element(j, &f)) {
+                uint8_t t = 0;
+                if (!syn_target(j, &t, err, errn))
+                    return 0;
+                if (y->nknobs < MM_SYN_KNOBS)
+                    y->knobs[y->nknobs++] = t;
+            }
+        } else if (name_eq(key, "mw")) {
+            if (!syn_target(j, &y->mw, err, errn))
+                return 0;
+        } else if (name_eq(key, "at")) {
+            if (!syn_target(j, &y->at, err, errn))
+                return 0;
+        } else if (name_eq(key, "pb")) {
+            if (!syn_target(j, &y->pb, err, errn))
+                return 0;
+        } else
+            json_skip(j);
+    }
+    if (j->err)
+        return 0;
+    if (chan < 0 || chan > 16 || cc < 0 || cc > 127) {
+        snprintf(err, (size_t)errn, "synth: channel 1..16 (0: none), cc 0..127");
+        return 0;
+    }
+    y->chan = chan ? (uint8_t)(chan - 1) : 0xFF;
+    y->cc = (uint8_t)cc;
+    return 1;
+}
+
 static int parse_page(struct json* j, struct mm_page* p, char* err, int errn) {
     char key[24];
     int first = 1, chan = 1, voice = 0, cc = 0;
@@ -220,6 +316,7 @@ int midimap_parse(struct midimap* m, const char* buf, int len, char* err, int er
     t.clock_follow = 1;
     t.cutter_chan = 7;
     reverb_defaults(&t.reverb);
+    synth_defaults(&t.synth);
     err[0] = 0;
     json_init(&j, buf, len);
     while (json_member(&j, &first, key, sizeof(key))) {
@@ -227,6 +324,9 @@ int midimap_parse(struct midimap* m, const char* buf, int len, char* err, int er
             json_bool(&j, &t.clock_follow);
         else if (name_eq(key, "reverb")) {
             if (!parse_reverb(&j, &t.reverb, err, errn))
+                break;
+        } else if (name_eq(key, "synth")) {
+            if (!parse_synth(&j, &t.synth, err, errn))
                 break;
         } else if (name_eq(key, "cutterChannel")) {
             json_int(&j, &t.cutter_chan);
@@ -284,7 +384,9 @@ int midimap_write(const struct midimap* m, char* buf, int n) {
         "consecutive CCs; rate: range of the rate knob (63 = 1); velocity / mw / at / pb: a note's velocity, "
         "mod wheel, channel aftertouch, pitch bend (its coarse 7 bits); cutterChannel: MIDI channel "
         "passed on to the break cutter on the ESP32 (0: none); reverb: the plate reverb's page, controls "
-        "size decay damp diffusion wander return glide spread glideMode send0 send1 send2 (the voices' sends). "
+        "size decay damp diffusion wander return glide spread glideMode send0 send1 send2 (the voices' sends); "
+        "synth: the wavetable synth's page, knobs are its parameters (OSC names, console 'synth params'), "
+        "pb 'bend' bends by bendRange. "
         "Controls: ");
     for (int t = 0; t < MT_NUM; ++t)
         OUT("%s%s", mm_target_names[t], t + 1 < MT_NUM ? " " : "");
@@ -301,6 +403,15 @@ int midimap_write(const struct midimap* m, char* buf, int n) {
             OUT("\"%s\"%s", rk_names[r->knobs[k2]], k2 + 1 < r->nknobs ? ", " : "");
         OUT("],\n             \"mw\": \"%s\", \"at\": \"%s\", \"pb\": \"%s\"},\n", rk_names[r->mw], rk_names[r->at],
             rk_names[r->pb]);
+    }
+    {
+        const struct mm_synth* y = &m->synth;
+        OUT("  \"synth\": {\"channel\": %d, \"cc\": %d, \"knobs\": [", y->chan == 0xFF ? 0 : y->chan + 1, y->cc);
+        for (int k2 = 0; k2 < y->nknobs; ++k2)
+            OUT("\"%s\"%s%s", mm_syn_name(y->knobs[k2]), k2 + 1 < y->nknobs ? ", " : "",
+                (k2 % 8 == 7 && k2 + 1 < y->nknobs) ? "\n             " : "");
+        OUT("],\n            \"mw\": \"%s\", \"at\": \"%s\", \"pb\": \"%s\"},\n", mm_syn_name(y->mw),
+            mm_syn_name(y->at), mm_syn_name(y->pb));
     }
     OUT("  \"pages\": [\n");
     for (int i = 0; i < m->npages; ++i) {

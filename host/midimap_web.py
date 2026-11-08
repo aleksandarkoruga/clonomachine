@@ -27,6 +27,28 @@ sys.path.insert(0, HERE)
 from ftdi_console import open_console  # noqa: E402
 
 PAGE = os.path.join(HERE, "midimap_web.html")
+SYNTH_H = os.path.join(HERE, "..", "include", "synth_params.h")
+SY_RE = re.compile(r"SY\(\s*\w+,\s*(\w+),\s*(SK_\w+),\s*([-\d.]+),\s*([-\d.]+),\s*([-\d.]+),\s*(\d)\)"
+                   r"(?:\s*/\*\s*(.*?)\s*\*/)?")
+
+
+def synth_info():
+    """The synth's parameters from include/synth_params.h: name -> kind, range, default, mod, note
+    (the page turns them into ranges); the list in the firmware's order."""
+    info, order = {}, []
+    for m in SY_RE.finditer(open(SYNTH_H).read()):
+        name, kind, lo, hi, d, mod, note = m.groups()
+        info[name] = {"kind": kind[3:].lower(), "lo": float(lo), "hi": float(hi), "def": float(d),
+                      "mod": mod == "1", "note": note or ""}
+        order.append(name)
+    return info, order
+
+
+def with_synth(names):
+    info, order = synth_info()
+    names.setdefault("synth", ["none", "bend"] + order)  # an older firmware has no synth list
+    names["synthInfo"] = info
+    return names
 MIDI_RE = re.compile(r"\[midi ([0-9a-f]{2})\s+(\d+)\s+(\d+)\s+ch (\d+)\]")
 CHUNK = 80  # bytes per "mmput" line (160 hex digits; the console takes 191 characters)
 
@@ -96,7 +118,7 @@ class Board:
         return json.loads(self.block("midimap json", "MIDIMAP"))
 
     def get_names(self):
-        return json.loads(self.block("midimap names", "NAMES"))
+        return with_synth(json.loads(self.block("midimap names", "NAMES")))
 
     def put_map(self, text):
         data = text.encode()
@@ -145,7 +167,7 @@ class MockBoard:
         self.map = json.loads(out[:out.index("\n}\n") + 2])
         src = open(os.path.join(root, "fw", "midimap.c")).read()
         grab = lambda name: re.findall(r'"([A-Za-z0-9]+)"', src[src.index(name):src.index("};", src.index(name))])  # noqa: E731
-        self.names = {"controls": grab("mm_target_names[MT_NUM]"), "reverb": grab("rk_names[RK_NUM]")}
+        self.names = with_synth({"controls": grab("mm_target_names[MT_NUM]"), "reverb": grab("rk_names[RK_NUM]")})
         self.listeners, self.listeners_lock, self.monitor = set(), threading.Lock(), False
         self.random = random
 
@@ -155,7 +177,7 @@ class MockBoard:
                 if not self.monitor:
                     continue
                 r = self.random
-                ch, st = r.choice([(5, 0xB4), (3, 0xB2), (8, 0xB7), (7, 0xB6), (5, 0x94), (6, 0xE5)])
+                ch, st = r.choice([(5, 0xB4), (3, 0xB2), (8, 0xB7), (7, 0xB6), (5, 0x94), (6, 0xE5), (9, 0xB8), (9, 0x98)])
                 ev = {"st": st, "d1": r.randint(16, 30) if st & 0xF0 == 0xB0 else r.randint(0, 12),
                       "d2": r.randint(1, 127), "ch": ch, "t": time.time()}
                 with self.listeners_lock:

@@ -1,6 +1,6 @@
-/* MicroPython module "cutter": the break cutter (esp/cutter/cutter.c) on the ULX3S's on-board
- * ESP32, talking to the FPGA (fw/esplink.c) at 3 Mbaud in the SLIP + CRC-8 event frames of
- * include/sampler_events.h.
+/* MicroPython module "cutter": the break cutter (esp/cutter/cutter.c) and the harmony generator
+ * (esp/harmony/harmony.c) on the ULX3S's on-board ESP32, talking to the FPGA (fw/esplink.c) at
+ * 3 Mbaud in the SLIP + CRC-8 event frames of include/sampler_events.h.
  *
  * The ESP's UART0 pins (GPIO1 TX -> FPGA K4, GPIO3 RX <- FPGA K3) are the FPGA link. MicroPython's
  * REPL starts on them (115200, reachable through host/esp32/passthru.v); cutter.start() moves the
@@ -28,6 +28,7 @@
 #include "soc/gpio_sig_map.h"
 
 #include "cutter.h"
+#include "harmony.h"
 
 #define LINK_UART UART_NUM_1
 #define LINK_BAUD 3000000
@@ -38,6 +39,7 @@
 #define MARK_HELLO 2
 
 static struct cutter g_c;
+static struct harmony g_h;
 static int g_inited, g_running;
 static SemaphoreHandle_t g_mutex;
 static QueueHandle_t g_q;
@@ -98,7 +100,12 @@ static void frame_in(void) {
         if (e.type == EV_TICK)
             ++g_st.ticks;
         cut_rx(&g_c, &e);
+        harm_rx(&g_h, &e);
     }
+    struct harm_frame hf; /* the harmony generator answers on the tick itself */
+    while (harm_pop(&g_h, &hf))
+        if (hf.n)
+            send(hf.ev, hf.n);
 }
 
 static void byte_in(uint8_t c) {
@@ -185,6 +192,7 @@ static void ensure_init(void) {
     if (g_inited)
         return;
     cut_init(&g_c, esp_random());
+    harm_init(&g_h, esp_random());
     g_mutex = xSemaphoreCreateMutex();
     const esp_timer_create_args_t due = {.callback = mark, .arg = (void*)MARK_TIMER, .name = "cut_due"};
     const esp_timer_create_args_t hel = {.callback = mark, .arg = (void*)MARK_HELLO, .name = "cut_hello"};
@@ -321,6 +329,9 @@ static mp_obj_t cutter_status(void) {
             mp_obj_dict_store(moves, mp_obj_new_str(cut_move_name(m), strlen(cut_move_name(m))),
                               mp_obj_new_int(g_c.stats_hits[m]));
     PUT("moves", moves);
+    PUT("harmony", mp_obj_new_bool(g_h.on));
+    PUT("chords", mp_obj_new_int(g_h.chords));
+    PUT("cadences", mp_obj_new_int(g_h.cadences));
 #undef PUT
     unlock();
     return d;

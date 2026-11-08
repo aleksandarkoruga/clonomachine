@@ -5,8 +5,11 @@
 #   scripts/seed_sweep.sh <gateware dir> <tag> [seeds...]      (default seeds 1..8)
 #   NPR_EXTRA="--router router2" scripts/seed_sweep.sh ...      (extra nextpnr arguments)
 #
-# Logs go to build/seeds/<tag>_s<seed>.log. The best seed goes into nextpnr_seed in
-# soc/ulx3s_sampler.py; it only holds for the netlist it was found on.
+# Logs go to build/seeds/<tag>_s<seed>.log, the routed configs to <tag>_s<seed>.config: a
+# seed that meets timing becomes a bitstream without routing again:
+#   ecppack --bootaddr 0 --compress build/seeds/<tag>_s<seed>.config --bit <gateware dir>/radiona_ulx3s.bit
+# The best seed goes into nextpnr_seed in soc/ulx3s_sampler.py; it only holds for the netlist
+# it was found on.
 set -u
 GW=$1; TAG=$2; shift 2
 SEEDS=${*:-1 2 3 4 5 6 7 8}
@@ -14,7 +17,8 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 . "$ROOT/env.sh"
 OUT=$ROOT/build/seeds; mkdir -p "$OUT"
 for s in $SEEDS; do
-    nextpnr-ecp5 --json "$GW/radiona_ulx3s.json" --lpf "$GW/radiona_ulx3s.lpf" --85k --package CABGA381 \
+    nextpnr-ecp5 --json "$GW/radiona_ulx3s.json" --lpf "$GW/radiona_ulx3s.lpf" --textcfg "$OUT/${TAG}_s$s.config" \
+        --85k --package CABGA381 \
         --speed 6 --timing-allow-fail --seed "$s" ${NPR_EXTRA:-} > "$OUT/${TAG}_s$s.log" 2>&1 &
 done
 wait

@@ -20,6 +20,7 @@
 #include "midimap.h" /* rk_of */
 #include "reverb.h"
 #include "usbh.h"
+#include "synth.h"
 
 static struct slip g_slip_console;
 extern volatile unsigned int uart_rx_overflows; /* fw/uart.c */
@@ -112,7 +113,8 @@ static void help(void) {
          "usb | usbdesc | midimon <0|1|2 raw|3 raw+clocks> | usbpull <0 pull-downs|1 released> | clock <0|1> (follow MIDI clock)\n"
          "rev [<control> <0..127>] (plate reverb: size decay damp diffusion wander return glide spread glideMode send0..2)\n"
          "esp [sim <0|1>] (link to the ESP32 cutter; sim: the PC stands in on this console) | cutter <0|1> (voice 0 played by the cutter / MIDI)\n"
-         "midimap [reload|defaults] (MIDI pages from /midimap.json) | midiin <status> <d1> <d2> (hex, as from USB)");
+         "midimap [reload|defaults] (MIDI pages from /midimap.json) | midiin <status> <d1> <d2> (hex, as from USB)"
+         "\nsynth [tables|params|scales|note <n>|deg <d>|off|<param> <value>] (the wavetable synth, MIDI channel 9)");
     fputs("params:", stdout);
     for (int p = 0; p < P_NUM_PARAMS; ++p)
         printf(" %s", g_param_names[p]);
@@ -178,6 +180,7 @@ static void shell_line(char* line) {
     else if (!strcmp(c, "esp") && argc > 2 && !strcmp(argv[1], "sim")) esplink_set_sim(atoi(argv[2]));
     else if (!strcmp(c, "esp")) esplink_status();
     else if (!strcmp(c, "cutter") && argc > 1) mapping_set_cutter(atoi(argv[1]));
+    else if (!strcmp(c, "synth")) synth_console(argc, argv);
     else if (!strcmp(c, "midimap")) {
         if (argc > 1 && !strcmp(argv[1], "json")) { mapping_midimap_json(); return; }
         if (argc > 1 && !strcmp(argv[1], "names")) { mapping_midimap_names(); return; }
@@ -296,10 +299,10 @@ static void io_drain(void) {
 
 /* `prof`: where the main loop's time goes, per task, and inside the loader's breaks (engine
    samples; sums of 20.8 us ticks, unbiased over many calls) */
-enum { PF_CONSOLE, PF_ESP, PF_REVERB, PF_USB, PF_LOADER, PF_SLOTS, PF_B_CONSOLE, PF_B_USB, PF_B_REVERB, PF_B_ROUTE, PF_N };
+enum { PF_CONSOLE, PF_ESP, PF_REVERB, PF_USB, PF_LOADER, PF_SLOTS, PF_SYNTH, PF_B_CONSOLE, PF_B_USB, PF_B_REVERB, PF_B_ROUTE, PF_N };
 static const char* const g_pf_name[PF_N] = {"console",       "esp link",   "reverb",         "usb",
-                                            "loader",        "slots",      " break console", " break usb",
-                                            " break reverb", " break route"};
+                                            "loader",        "slots",      "synth",          " break console",
+                                            " break usb",    " break reverb", " break route"};
 static uint32_t g_pf[PF_N], g_pf_since;
 #define PF(k, call)                                          \
     do {                                                     \
@@ -328,6 +331,7 @@ static void route_pending(int from_loader) {
 
 /* samples_idle_hook: called by the loader between slices of work */
 static void console_pump(void) {
+    synth_service();
     PF(PF_B_CONSOLE, console_drain());
     PF(PF_B_USB, usbh_poll()); /* MIDI keeps flowing while banks load */
     PF(PF_B_REVERB, reverb_service());
@@ -377,6 +381,7 @@ int main(void) {
     printf("smp> ");
 
     mapping_midimap_load();
+    synth_init();
     reverb_init();
     usbh_init();
     samples_idle_hook = console_pump;  /* loader slices: dispatch events */
@@ -397,6 +402,7 @@ int main(void) {
         PF(PF_USB, usbh_poll());
         PF(PF_LOADER, samples_poll());
         PF(PF_SLOTS, slots_service());
+        PF(PF_SYNTH, synth_service());
     }
     return 0;
 }

@@ -31,6 +31,7 @@ from litex.soc.cores.gpio import GPIOIn, GPIOOut
 from litex.soc.integration.soc import SoCRegion
 from litex.soc.integration.soc_core import SoCCore
 from litex.soc.interconnect.csr import CSRStorage, CSRField
+from litex.soc.interconnect import wishbone
 from litex.soc.integration.builder import Builder
 
 from litedram import modules as litedram_modules
@@ -109,6 +110,26 @@ class _UsbPull(LiteXModule):
             self.comb += [t.o.eq(o), t.oe.eq(oe)]
 
 
+class _WbSlice(LiteXModule):
+    """A registered stage in front of a wishbone slave, one access at a time (two cycles more per
+    access): the shared bus's decode no longer runs into the slave's inputs. In front of the USB
+    host's control port, whose clock-crossing inputs ended the sys clock's worst path."""
+    def __init__(self, slave):
+        self.bus = m = wishbone.Interface.like(slave)
+        busy = Signal()
+        self.sync += [
+            m.ack.eq(0),
+            m.err.eq(0),
+            If(~busy,
+                If(m.cyc & m.stb & ~m.ack,
+                    slave.adr.eq(m.adr), slave.dat_w.eq(m.dat_w), slave.sel.eq(m.sel), slave.we.eq(m.we),
+                    slave.cti.eq(0), slave.bte.eq(0), slave.cyc.eq(1), slave.stb.eq(1), busy.eq(1))
+            ).Elif(slave.ack | slave.err,
+                slave.cyc.eq(0), slave.stb.eq(0), m.dat_r.eq(slave.dat_r), m.ack.eq(slave.ack),
+                m.err.eq(slave.err), busy.eq(0))
+        ]
+
+
 def pll_out_freq(pll, n=0):
     cfg = pll.compute_config()
     return cfg["clko{}_freq".format(n)], cfg
@@ -116,7 +137,8 @@ def pll_out_freq(pll, n=0):
 
 class SamplerSoC(SoCCore):
     def __init__(self, device="LFE5U-85F", revision="2.0", sys_clk_freq=45e6, audio_clk_freq=49.152e6,
-                 sdram_module="MT48LC16M16", n_slots=2, with_usb_host=True, with_synth=False, synth_flog=10,
+                 sdram_module="MT48LC16M16", n_slots=2, with_usb_host=True, with_synth=True, synth_flog=10,
+                 synth_voices=3,
                  **kwargs):
         platform = radiona_ulx3s.Platform(device=device, revision=revision, toolchain="trellis")
         platform.add_extension(_esp_io)
@@ -155,7 +177,7 @@ class SamplerSoC(SoCCore):
         # Sampler ----------------------------------------------------------------------------------
         port = self.sdram.crossbar.get_port(mode="read")
         self.sampler = Sampler(platform, port, platform.request("audio"), n_slots=n_slots, with_synth=with_synth,
-                               synth_flog=synth_flog)
+                               synth_flog=synth_flog, synth_voices=synth_voices)
         self.platform.add_period_constraint(self.crg.cd_audio.clk, 1e9 / audio_clk_freq)
         self.platform.add_false_path_constraints(self.crg.cd_sys.clk, self.crg.cd_audio.clk)
 
@@ -172,7 +194,8 @@ class SamplerSoC(SoCCore):
                 dp = [usb_pads.d_p]
                 dm = [usb_pads.d_n]
             self.usb_ohci = USBOHCI(platform, _OhciPads, usb_clk_freq=int(48e6))
-            self.bus.add_slave("usb_ohci_ctrl", self.usb_ohci.wb_ctrl,
+            self.usb_ohci_slice = _WbSlice(self.usb_ohci.wb_ctrl)
+            self.bus.add_slave("usb_ohci_ctrl", self.usb_ohci_slice.bus,
                 region=SoCRegion(origin=0x90000000, size=0x1000, cached=False))
             self.bus.add_master("usb_ohci_dma", master=self.usb_ohci.wb_dma)
             self.usb_pull = _UsbPull(usb_pads.pullup)
@@ -197,14 +220,23 @@ def main():
         help="MT48LC16M16 / IS42S16160 (32 MB) or AS4C32M16 (64 MB, ULX3S v3.1.x)")
     parser.add_target_argument("--n-slots",      default=3, type=int)
     parser.add_target_argument("--flash",        action="store_true", help="Write the bitstream to SPI flash.")
-    parser.add_target_argument("--with-synth",   action="store_true",
-        help="Add the wavetable synth prototype (rtl/synth_top.v) beside the engine.")
+    parser.add_target_argument("--no-synth",     action="store_true",
+        help="Leave the wavetable synth (rtl/synth_top.v) out: 5 sample banks resident instead of 4, "
+             "the full BIOS console.")
+    parser.add_target_argument("--with-synth",   action="store_true", help=argparse.SUPPRESS)  # the default now
     parser.add_target_argument("--synth-flog",   default=10, type=int,
         help="Synth frame cache size log2 (10: 1024-sample frames, 9: 512).")
-    # seed 9 (audio 62.4 / sys 49.4 MHz at 45 MHz). With the engine, PV and plate pipelined
-    # a 9-seed sweep gave audio 55.3-57.5 MHz (>= 12 % over 49.15), sys 45.6-49.6
-    # (scripts/seed_sweep.sh), so the seed is no longer critical
-    parser.set_defaults(cpu_type="vexriscv", cpu_variant="standard", output_dir="build/ulx3s_sampler", nextpnr_seed=9)
+    parser.add_target_argument("--synth-voices", default=3, type=int, choices=(2, 3),
+        help="Synth voices (each: two oscillators and a filter lane).")
+    # With the synth the design needs 203 of the 208 block RAMs: the BIOS is built with LTO and
+    # without its console (that frees 9; the boot sequence, flash or serial, stays, the prompt
+    # goes). Seeds: scripts/seed_sweep.sh (a sweep keeps the routed configs, packed without routing again).
+    # Without the synth: seed 9 (audio 62.4 / sys 49.4 MHz); a 9-seed sweep gave audio
+    # 55.3-57.5 MHz, sys 45.6-49.6. A seed only holds for the netlist it was found on.
+    synth = "--no-synth" not in sys.argv
+    parser.set_defaults(cpu_type="vexriscv", cpu_variant="standard", output_dir="build/ulx3s_sampler",
+                        **(dict(nextpnr_seed=9, bios_lto=True, bios_console="disable") if synth else
+                           dict(nextpnr_seed=9)))
     args = parser.parse_args()
 
     soc = SamplerSoC(
@@ -213,8 +245,9 @@ def main():
         sys_clk_freq = args.sys_clk_freq,
         sdram_module = args.sdram_module,
         n_slots      = args.n_slots,
-        with_synth   = args.with_synth,
+        with_synth   = not args.no_synth,
         synth_flog   = args.synth_flog,
+        synth_voices = args.synth_voices,
         **parser.soc_argdict,
     )
     builder = Builder(soc, **parser.builder_argdict)

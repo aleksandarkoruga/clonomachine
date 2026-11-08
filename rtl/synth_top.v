@@ -15,6 +15,7 @@
 // (v * 4 + t), 16 + v amp target s18 Q1.16 (the gain glides to it, ~0.7 ms).
 `default_nettype none
 module synth_top #(
+    parameter NV        = 3,              // voices (2 or 3): oscillator pairs, filter lanes
     parameter FLOG      = 10,             // frame cache size log2 (the largest mip level played)
     parameter SINC_HEX  = "sy_sinc.hex",
     parameter FN_HEX    = "sy_fn.hex",
@@ -77,7 +78,7 @@ module synth_top #(
     wire         osc_busy;
     reg  [2:0]   osc_ra;
     wire signed [23:0] osc_f, osc_d;
-    synth_osc #(.FLOG(FLOG), .SINC_HEX(SINC_HEX), .FN_HEX(FN_HEX)) u_osc (
+    synth_osc #(.NV(NV), .FLOG(FLOG), .SINC_HEX(SINC_HEX), .FN_HEX(FN_HEX)) u_osc (
         .clk(clk), .rst(rst), .start(osc_start), .busy(osc_busy),
         .we(cmd_fire && to_osc), .waddr(cmd_addr[9:0]), .wdata(cmd_data),
         .req_valid(req_valid), .req_ready(req_ready), .req_addr(req_addr),
@@ -89,7 +90,7 @@ module synth_top #(
     reg  [31:0]  in_d;
     reg  [4:0]   y_ra;
     wire signed [31:0] y_q;
-    synth_filt #(.UCODE_HEX(UCODE_HEX), .FFN_HEX(FFN_HEX)) u_filt (
+    synth_filt #(.NL(NV), .UCODE_HEX(UCODE_HEX), .FFN_HEX(FFN_HEX)) u_filt (
         .clk(clk), .rst(rst), .start(filt_start), .busy(filt_busy),
         .we(cmd_fire && to_filt), .waddr(cmd_addr[10:0]), .wdata(cmd_data),
         .in_we(in_we), .in_a(in_a), .in_d(in_d),
@@ -143,18 +144,19 @@ module synth_top #(
     end
 
     // ------------------------------------------------------------------ mixer
-    // counter mc = 0..95: sub = mc / 48, v = (mc % 48) / 16, step = mc % 16. Each operation in a
+    // counter mc = 0..NV*32-1: sub = mc / (NV*16), v = (mc % (NV*16)) / 16, step = mc % 16. Each operation in a
     // cycle of its own (stage 2 = the y read's data, stage 3 one later):
     //   steps 0..3  stage 2: y x w registered; stage 3: into the voice sum (step 0 starts it)
     //   step 4      stage 3: + the bypass
     //   step 6      stage 2: the voice sum saturated to 32 bits (step 4's add landed a cycle before)
     //   step 7      stage 2: x amp registered
     //   step 8      stage 2: into the sub-sample's sum (v = 0 starts it)
-    //   step 9      stage 2: (v = 2) the sum to the decimator
+    //   step 9      stage 2: (the last voice) the sum to the decimator
+    localparam [6:0] MV = NV * 16;
     reg  [6:0]   mc;
     reg          mrun;
-    wire         msub = mc >= 7'd48;
-    wire [6:0]   mrem = msub ? mc - 7'd48 : mc;
+    wire         msub = mc >= MV;
+    wire [6:0]   mrem = msub ? mc - MV : mc;
     wire [1:0]   mv   = mrem[5:4];
     wire [3:0]   mstp = mrem[3:0];
     reg          m_v1, m_v2, m_v3;
@@ -178,7 +180,7 @@ module synth_top #(
                 mc <= 0;
             end else if (mrun) begin
                 mc <= mc + 1'b1;
-                if (mc == 7'd95)
+                if (mc == 2 * MV - 1)
                     mrun <= 1'b0;
             end
             y_ra <= {msub, mstp[1:0], mv};
@@ -194,7 +196,7 @@ module synth_top #(
                 4'd6: vs_r <= sat32(mx_vs);
                 4'd7: va_r <= vs_r * amp[mk2[5:4]];
                 4'd8: mx_acc <= ((mk2[5:4] == 0) ? 48'sd0 : mx_acc) + (va_r >>> 16);
-                4'd9: if (mk2[5:4] == 2'd2) begin
+                4'd9: if (mk2[5:4] == NV - 1) begin
                     hi[mk2[6]] <= sat32(mx_acc);
                     if (mk2[6])
                         dc_go <= 1'b1;

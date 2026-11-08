@@ -26,8 +26,10 @@
  * sample's length in 16ths, and the MIDI messages of the cutter channel (CC 16.. = the knobs,
  * CC 25 phrase bars 1..127, CC 26 phrases per section 1..8, CC 27 silences per phrase at most
  * (127: no limit), CC 28 samples: below 64 only the drum page's, from 64 the cutter may switch,
- * CC 29 arrangement: 0 the loop's own order .. 127 every hit from the arrangement (start-up);
- * notes = presets, pitch bend = conductor auto / manual). The cutter answers with frames of
+ * CC 29 arrangement: 0 the loop's own order .. 127 every hit from the arrangement (start-up),
+ * CC 30 preset (0..127 over the presets); notes = the rhythmic intensity (the note number is the
+ * syncopation knob, the remaining bars of the phrase take it at once), pitch bend = conductor
+ * auto / manual). The cutter answers with frames of
  * EV_RAW_PARAM events for slot 0, some of them delayed (ratchets, tape stops). Gate length and
  * volume stay MIDI's (the drum page): the cutter's staccato only closes a gate early, stutters,
  * freezes and tape stops hold it open until they return. After a stutter, a ratchet or a
@@ -119,6 +121,7 @@ void cut_set_phrase(struct cutter* c, int bars, int sections); /* 0 keeps; from 
 void cut_set_silences(struct cutter* c, int n);        /* per phrase at most, < 0: no limit */
 void cut_set_swap(struct cutter* c, int on);           /* 0: only the drum page's sample */
 void cut_set_arrange(struct cutter* c, float v);       /* 0 the loop's own order .. 1 arranged */
+void cut_set_intensity(struct cutter* c, float v);     /* the syncopation knob, from this bar on */
 /* the host's clock in seconds: set it before cut_rx, which schedules from it */
 void cut_clock(struct cutter* c, double t);
 /* an event from the FPGA (EV_TICK, EV_BPM, EV_START, EV_STOP, EV_OWNER, EV_LOAD_BUF, the

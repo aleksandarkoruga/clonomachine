@@ -1,7 +1,7 @@
 // Host check of fw/wavutil.c: wav_convert against a double-precision reference (synthetic
 // edge cases + the first and a middle stretch of real files) and the split plan per file.
 //
-//   g++ -O2 -std=c++20 -Ifw host/test_wavutil.cpp fw/wavutil.c -o test_wavutil
+//   gcc -O2 -c -Ifw fw/wavutil.c -o wavutil.o && g++ -O2 -std=c++20 -Ifw host/test_wavutil.cpp wavutil.o -o test_wavutil
 //   ./test_wavutil [file.wav ...]
 #include <cmath>
 #include <cstdint>
@@ -13,7 +13,7 @@ extern "C" {
 #include "wavutil.h"
 }
 
-static const uint32_t kMaxFrames = (7u << 20) / 2 - 64 - 128 - 64; // as fw/samples.c
+static const uint32_t kMaxFrames = (11u << 19) / 2 - 64 - 128 - 64; // as fw/samples.c (BANK_MAX_BYTES)
 
 static double chan_ref(const uint8_t* p, int fmt, int bits) {
     if (fmt == WAV_FLOAT) {

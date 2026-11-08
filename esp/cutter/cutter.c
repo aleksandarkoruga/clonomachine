@@ -108,6 +108,23 @@ void cut_set_swap(struct cutter* c, int on) { c->p.swap = !!on; }
 
 void cut_set_arrange(struct cutter* c, float v) { c->p.arrange = clamp01(v); }
 
+static uint16_t bar_pattern(struct cutter* c, float density, float sync);
+static int bar16(const struct cutter* c);
+static int phrase16(const struct cutter* c);
+
+/* the rhythmic intensity (the syncopation knob: the bar pattern's intensity number), from the
+   current bar on: the phrase's remaining bars get new patterns at once */
+void cut_set_intensity(struct cutter* c, float v) {
+    v = clamp01(v);
+    c->p.knob[CK_SYNCOPATION] = v;
+    c->e.knob[CK_SYNCOPATION] = v; /* the conductor leaves it alone */
+    if (!c->have_step)
+        return;
+    const int pos = (int)((c->step / 2) % (uint32_t)phrase16(c));
+    for (int b = pos / bar16(c); b < c->e.phrase_bars && b < CUT_MAX_BARS; ++b)
+        c->bar_pattern[b] = bar_pattern(c, c->e.knob[CK_DENSITY], v);
+}
+
 void cut_init(struct cutter* c, uint32_t seed) {
     memset(c, 0, sizeof(*c));
     params_default(&c->p);
@@ -635,7 +652,8 @@ void cut_rx(struct cutter* c, const struct smp_event* e) {
             c->p.base_buf = e->b;
         break;
     case EV_CC: /* the cutter channel: CC 16.. = the knobs, then phrase bars, section phrases,
-                   silences per phrase, sample switching and the arrangement; mod wheel = release */
+                   silences per phrase, sample switching, the arrangement and the preset; mod wheel
+                   = release */
         if (e->a >= 16 && e->a < 16 + CK_NUM)
             cut_set_knob(c, e->a - 16, (float)e->b / 127.0f);
         else if (e->a == 16 + CK_NUM)
@@ -648,12 +666,17 @@ void cut_rx(struct cutter* c, const struct smp_event* e) {
             cut_set_swap(c, e->b >= 64);
         else if (e->a == 20 + CK_NUM)
             cut_set_arrange(c, (float)e->b / 127.0f);
+        else if (e->a == 21 + CK_NUM) { /* the preset: a change of range only */
+            const int n = e->b * NPRESETS / 128;
+            if (n != c->preset)
+                cut_preset(c, n);
+        }
         else if (e->a == 1)
             cut_set_knob(c, CK_RELEASE, (float)e->b / 127.0f);
         break;
-    case EV_NOTE_ON: /* a note picks a preset */
+    case EV_NOTE_ON: /* a note sets the rhythmic intensity: its number 0..127 (from this bar on) */
         if (e->b)
-            cut_preset(c, e->a);
+            cut_set_intensity(c, (float)e->a / 127.0f);
         break;
     case EV_BEND: /* above the centre: the conductor plays the form */
         cut_set_conductor(c, e->value > 8192 + 512);

@@ -30,7 +30,11 @@ enum {
     EV_TICK      = 11,  /* FPGA -> ESP: a 32nd. value = step (since start), chan = source
                            (0 engine beat, 1 MIDI clock), a = flags (bit 0 playing)         */
     EV_OWNER     = 12,  /* FPGA -> ESP: a = slot, b = 1 the cutter plays it, 0 MIDI does    */
-    EV_HELLO     = 13   /* ESP -> FPGA, every <= 1 s: value = protocol version (1)          */
+    EV_HELLO     = 13,  /* ESP -> FPGA, every <= 1 s: value = protocol version (1)          */
+    /* the wavetable synth (fw/synth.c; its MIDI notes / CCs: the synth channel's events)     */
+    EV_SYN_NOTE  = 14,  /* a = scale degree + 64 (64: the root at MIDI 60), b = velocity, 0 off
+                           (the harmony generator: degrees go through the synth's scale)     */
+    EV_SYN_PARAM = 15   /* a = parameter (include/synth_params.h), value = natural units x 2^16 */
 };
 
 struct __attribute__((packed)) smp_event {

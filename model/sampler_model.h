@@ -97,6 +97,8 @@ public:
     ReverbModel rev;         // the plate: the voices' sends in, its sample back into the right
     int32_t revOut = 0;      // (one sample later)
     uint32_t revRet = 0;
+    uint32_t synSend = 0;
+    int32_t synthIn = 0;   // the synth's sample of the period before (SYN_SEND); set by the caller
     uint64_t beat = 0;
     uint32_t beatInc = 0;
     uint32_t samples = 0;

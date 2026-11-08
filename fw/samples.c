@@ -37,7 +37,12 @@ static const char* const g_dirs[MAX_LIBS] = {"/drums", "/melody", "/bass", "/kic
 
 #define POOL_START_WORDS (0x200000u / 2)  /* firmware owns the first 2 MB (fw/linker.ld) */
 static volatile int16_t* const g_mem = (volatile int16_t*)MAIN_RAM_BASE;
-static uint32_t pool_end_words(void) { return MAIN_RAM_SIZE / 2; }
+#ifdef CSR_SAMPLER_SYNTH_CMD_DATA_ADDR
+#define POOL_END_BYTES (MAIN_RAM_SIZE - (SYNTH_TABLE_MB << 20))   /* the synth's tables above */
+#else
+#define POOL_END_BYTES MAIN_RAM_SIZE
+#endif
+static uint32_t pool_end_words(void) { return POOL_END_BYTES / 2; }
 static uint32_t g_lru_clock;
 static int g_card_ok;
 
@@ -100,7 +105,8 @@ void samples_hold(int lib, int bank, uint32_t ms) {
 
 /* ---- pool allocator: one bank per region, LRU eviction ----------------------------------
  * The pool is cut into equal regions that each hold the largest bank (BANK_MAX_BYTES):
- * 4 x 7.5 MB in the 30 MB pool. Any free region fits any bank, so free space can't
+ * 4 x 5.5 MB in the 22 MB pool below the synth's tables (5 x 6 MB in the 30 MB pool of a
+ * gateware without the synth). Any free region fits any bank, so free space can't
  * fragment. (First fit at any address left gaps just under a bank between two playing
  * banks: a 7.1 MB bank then found no room until one of them was replaced.) */
 static struct bank* g_job_bank;
@@ -1351,6 +1357,8 @@ void samples_want(int lib, int bank, int idx, int prio) { (void)lib; (void)bank;
 int samples_poll(void) { return 0; }
 static uint32_t g_load_bytes, g_load_ms, g_load_count;
 #endif
+
+int samples_card_ok(void) { return g_card_ok; }
 
 /* Two synthetic 8-beat loops (120 and 172 BPM) so the engine can be heard without a card. */
 int samples_load_builtin(void) {

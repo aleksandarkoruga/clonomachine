@@ -25,12 +25,17 @@
 //     8      pos        [23:0] u8.16 frame position, [24] smooth
 //     9      lvl        [24:0] SDRAM word address of frame 0 of the level, [28:25] logN (8..FLOG)
 //     10     mode       [4:0] warp 1, [9:5] warp 2, [11:10] unison voices - 1, [12] to filter,
-//                       [13] fresh (note on: play nothing until this note's frames are in), [14] on
+//                       [13] fresh (note on: play nothing until this note's frames are in), [14] on,
+//                       [15] with [13]: the unison phases restart from their start phases (20..23)
+//                       and, for oscillator A, the voice's sub from 0
 //     11/12  wpar1/2    warp parameter (see below)
 //     13/14  wparb1/2   second warp parameter
 //     15     level      s18 Q1.16 into the voice mix
 //     16     nframes-1  [7:0]
 //     17/18  wparc1/2   third warp parameter
+//     20..23 ph0[u]     [17:0] unison voice u's start phase (x 2^14 of a cycle), see mode [15]
+// A write to lvl (9) drops the oscillator's cached frames (also a load under way): the frames of
+// another table or level are never played for this one's.
 //   voice v, waddr = {1, 0, v[1:0], r[3:0]}:
 //     0 sub inc, 1 sub gain s18 Q1.16 ([20] triangle instead of sine), 2 noise gain s18 Q1.16,
 //     3 flags: [0] sub to filter, [1] noise to filter, [2] B first (A is modulated by B)
@@ -130,9 +135,12 @@ module synth_osc #(
     reg               r_subtri [0:NV-1];
     reg signed [17:0] r_noiseg [0:NV-1];
     reg [2:0]         r_vflags [0:NV-1];
+    reg [17:0]        r_ph0   [0:NO*UMAX-1];
     wire [OB-1:0]     wo = waddr[7:5];
     wire [4:0]        wr = waddr[4:0];
     wire              fresh_set = we && !waddr[8] && wr == 5'd10 && wdata[13];
+    wire              phres_set = fresh_set && wdata[15];
+    wire              base_set  = we && !waddr[8] && wr == 5'd9;
     always @(posedge clk) begin
         if (we && !waddr[8]) begin
             case (wr)
@@ -155,6 +163,7 @@ module synth_osc #(
             5'd16: r_nfm1[wo] <= wdata[7:0];
             5'd17: r_wc1[wo] <= wdata[17:0];
             5'd18: r_wc2[wo] <= wdata[17:0];
+            5'd20, 5'd21, 5'd22, 5'd23: r_ph0[{wo, wr[1:0]}] <= wdata[17:0];
             default: ;
             endcase
         end
@@ -219,14 +228,16 @@ module synth_osc #(
     reg [3:0]    pl_n  [0:NO-1];
     reg          pl_ok [0:NO-1];
     reg          fresh [0:NO-1];
+    reg          ep    [0:NO-1];     // flips on a lvl write: loads of the epoch before are dropped
+    reg          ld_ep [0:NO-1];
     // one load per oscillator at a time
     reg          ld_act  [0:NO-1];
     reg [BB-1:0] ld_buf  [0:NO-1];
     reg [24:0]   ld_addr [0:NO-1];   // next line
     reg [4:0]    ld_left [0:NO-1];   // lines still to request - 1
     reg [4:0]    ld_line [0:NO-1];   // index of the next line
-    // tag FIFO of the requested lines: {last, osc, buf, line}
-    localparam TW = 1 + OB + BB + 5;
+    // tag FIFO of the requested lines: {epoch, last, osc, buf, line}
+    localparam TW = 1 + 1 + OB + BB + 5;
     reg [TW-1:0] tq [0:31];
     reg [4:0]    tq_wp, tq_rp;
     reg [5:0]    tq_n;
@@ -254,7 +265,7 @@ module synth_osc #(
 
     integer i;
     reg [BB-1:0]  b0, b1, vic;
-    reg           h0, h1, vok;
+    reg           h0, h1, vok, vnp;
     reg [OB-1:0]  nx;
     reg           nxv;
     always @(posedge clk) begin
@@ -275,6 +286,7 @@ module synth_osc #(
                 ld_act[i] <= 0;
                 pl_ok[i] <= 0;
                 fresh[i] <= 1;
+                ep[i] <= 0;
             end
         end else begin
             cw_we <= 0;
@@ -323,11 +335,16 @@ module synth_osc #(
                     cc_st <= 2'd2;
                 end
                 default: begin   // play selection, maybe start a load
-                    h0 = 0; h1 = 0; vok = 0; b0 = 0; b1 = 0; vic = 0;
+                    // the victim: a buffer that isn't being played if there is one (a stepped
+                    // oscillator then keeps playing its frame until the new one is in)
+                    h0 = 0; h1 = 0; vok = 0; b0 = 0; b1 = 0; vic = 0; vnp = 0;
                     for (i = NBUF - 1; i >= 0; i = i - 1) begin
                         if (cc_h0[i]) begin h0 = 1; b0 = i; end
                         if (cc_h1[i]) begin h1 = 1; b1 = i; end
-                        if (!cc_busy[i]) begin vok = 1; vic = i; end
+                        if (!cc_busy[i] && !vnp) begin vok = 1; vic = i; end
+                        if (!cc_busy[i] && !(pl_ok[cc_o] && (pl_a[cc_o] == i || pl_b[cc_o] == i))) begin
+                            vok = 1; vic = i; vnp = 1;
+                        end
                     end
 `ifdef SYNTH_DEBUG
                     if (cc_o == 0)
@@ -362,6 +379,7 @@ module synth_osc #(
                             ld_addr[cc_o] <= r_base[cc_o] + ({17'd0, (cc_p0 != 0 ? cc_f1 : cc_f0)} << r_logn[cc_o]);
                             ld_left[cc_o] <= (5'd1 << (r_logn[cc_o] - 4'd6)) - 1'b1;
                             ld_line[cc_o] <= 0;
+                            ld_ep[cc_o]   <= ep[cc_o];
                             tg_f[cc_o * NBUF + vic] <= cc_p0 != 0 ? cc_f1 : cc_f0;
                             tg_n[cc_o * NBUF + vic] <= r_logn[cc_o];
                             tg_s[cc_o * NBUF + vic] <= 2'd1;
@@ -381,7 +399,7 @@ module synth_osc #(
 `ifdef SYNTH_DEBUG
                 $display("req o %0d addr %0d left %0d line %0d", rq_o, rq_a, ld_left[rq_o], ld_line[rq_o]);
 `endif
-                tq[tq_wp] <= {ld_left[rq_o] == 0, rq_o, ld_buf[rq_o], ld_line[rq_o]};
+                tq[tq_wp] <= {ld_ep[rq_o], ld_left[rq_o] == 0, rq_o, ld_buf[rq_o], ld_line[rq_o]};
                 tq_wp <= tq_wp + 1'b1;
                 if (ld_left[rq_o] == 0)
                     ld_act[rq_o] <= 1'b0;
@@ -411,12 +429,19 @@ module synth_osc #(
                 fw <= fw + 1'b1;
                 if (fw == 6'd63) begin
 `ifdef SYNTH_DEBUG
-                    $display("fill done tag %b o %0d b %0d line %0d last %0d n %0d", tqh, tq_o, tq_b, tqh[4:0], tqh[TW-1], tq_n);
+                    $display("fill done tag %b o %0d b %0d line %0d last %0d n %0d", tqh, tq_o, tq_b, tqh[4:0], tqh[TW-2], tq_n);
 `endif
                     tq_rp <= tq_rp + 1'b1;
-                    if (tqh[TW - 1])
-                        tg_s[tq_o * NBUF + tq_b] <= 2'd2;
+                    if (tqh[TW - 2])   // the last line: ready, unless the lvl changed meanwhile
+                        tg_s[tq_o * NBUF + tq_b] <= (tqh[TW - 1] == ep[tq_o] && !(base_set && wo == tq_o))
+                                                    ? 2'd2 : 2'd0;
                 end
+            end
+            if (base_set) begin   // another table / level: what's cached is dropped
+                ep[wo] <= !ep[wo];
+                for (i = 0; i < NBUF; i = i + 1)
+                    if (tg_s[wo * NBUF + i] == 2'd2)
+                        tg_s[wo * NBUF + i] <= 2'd0;
             end
             tq_n <= tq_n + (rq_fire ? 6'd1 : 6'd0) - ((fill_valid && fw == 6'd63) ? 6'd1 : 6'd0);
         end
@@ -431,6 +456,7 @@ module synth_osc #(
                                       // where sc_v / sc_second change (S_VOICE, S_JOB, S_HAND)
     reg  [31:0]   ph    [0:NO*UMAX-1]; // unison phases
     reg  [31:0]   subph [0:NV-1];
+    reg           phr   [0:NO-1];      // restart the unison phases at the oscillator's next jobs
     reg  signed [17:0] modv [0:NO-1];  // each oscillator's latest output (the modulator)
     reg  signed [17:0] v_sub, v_noise; // this voice, this sub-sample
     reg  signed [23:0] sn_f, sn_d;     // sub + noise into the voice sums
@@ -527,6 +553,8 @@ module synth_osc #(
                 ph[i] <= 0;
             for (i = 0; i < NV; i = i + 1)
                 subph[i] <= 0;
+            for (i = 0; i < NO; i = i + 1)
+                phr[i] <= 0;
         end else begin
             vo_we <= 1'b0;
             if (pd_v) begin
@@ -579,8 +607,8 @@ module synth_osc #(
             S_JOB: begin
                 // the job's registers load in every S_JOB cycle (nothing reads them before S_WARP),
                 // so only the state depends on the tests below
-                wa_p   <= ph[{sc_o, sc_u}];
-                wa_p0  <= ph[{sc_o, sc_u}];
+                wa_p   <= phr[sc_o] ? {r_ph0[{sc_o, sc_u}], 14'd0} : ph[{sc_o, sc_u}];
+                wa_p0  <= phr[sc_o] ? {r_ph0[{sc_o, sc_u}], 14'd0} : ph[{sc_o, sc_u}];
                 wa_inc <= {1'b0, r_inc[{sc_o, sc_u}]};
                 wa_g   <= 18'sd65536;
                 wa_oe  <= 1'b0;
@@ -701,6 +729,7 @@ module synth_osc #(
                 tj_oen <= wa_oen;
                 tj_last <= sc_u == r_uni[sc_o];
                 if (sc_u == r_uni[sc_o]) begin
+                    phr[sc_o] <= 1'b0;
                     sc_u <= 0;
                     if (sc_second)
                         st <= S_VEND;
@@ -737,6 +766,11 @@ module synth_osc #(
             end
             default: st <= S_IDLE;
             endcase
+            if (phres_set) begin   // a note's restart (wins over the clear above)
+                phr[wo] <= 1'b1;
+                if (!wo[0])
+                    subph[wo[OB-1:1]] <= 0;
+            end
         end
     end
 

@@ -94,7 +94,9 @@ enum {
     SMP_G_BEAT_INC    = 1,  /* u0.32 beats per sample = bpm/60/fs * 2^32                        */
     SMP_G_BEAT_CTRL   = 2,  /* write-only: bit0 reset beat phase to 0                           */
     SMP_G_CLR_STATS   = 3,  /* write-only: clear miss/drop counters and cycle high-water mark   */
-    SMP_G_REV_RETURN  = 4   /* u4.12 the plate reverb into the right output (reset 0)          */
+    SMP_G_REV_RETURN  = 4,  /* u4.12 the plate reverb into the right output (reset 0)          */
+    SMP_G_SYN_SEND    = 5   /* u4.12 the synth into the plate reverb (reset 0; no-op with --no-synth);
+                               its sample of the period before                                */
 };
 
 /* ---- status words ---- */

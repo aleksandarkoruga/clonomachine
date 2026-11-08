@@ -14,6 +14,11 @@ SuperCollider (or TouchOSC, ...) sends to this host; the bridge forwards to the 
                                 prob separation randPos randomPitch, plus bank trig envBars
                                 envDur envHold gateOff repeats interval amp ... (sampler_events.h)
   /slot/<n>/trig
+  /synth/<param> f              the wavetable synth's parameters in natural units (Hz, s,
+                                semitones, 0..1, indices; include/synth_params.h, console
+                                "synth params"), e.g. /synth/cutoff 800, /synth/scale 3
+  /synth/note i note i vel      a note on the synth (vel 0 = off), as MIDI on its channel
+  /synth/degree i deg i vel     a scale degree (0 = the root) through the synth's scale / tuning
   /transport/start, /transport/stop, /clock
 
 MIDI channels are SuperCollider's 0-based numbers (slot 0 = chan 9, slot 1 = chan 10).
@@ -34,8 +39,11 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EVENTS_H = os.path.join(HERE, "..", "include", "sampler_events.h")
+SYNTH_H = os.path.join(HERE, "..", "include", "synth_params.h")
 
 EV_NOTE_ON, EV_NOTE_OFF, EV_CC, EV_PC, EV_BEND, EV_BPM, EV_CLOCK, EV_START, EV_STOP, EV_RAW_PARAM, EV_LOAD_BUF = range(11)
+EV_SYN_NOTE, EV_SYN_PARAM = 14, 15
+SYNTH_CHAN = 8   # MIDI channel 9 (midimap.json "synth")
 SLIP_END, SLIP_ESC, SLIP_ESC_END, SLIP_ESC_ESC = 0xC0, 0xDB, 0xDC, 0xDD
 
 
@@ -45,6 +53,12 @@ def load_params(path=EVENTS_H):
     for i, m in enumerate(re.finditer(r"^\s*X\(\s*(\w+),\s*(\w+),\s*(\d+)\)", open(path).read(), re.M)):
         params[m.group(2).lower()] = (i, int(m.group(3)))
     return params
+
+
+def load_synth_params(path=SYNTH_H):
+    """{name_lower: id} from the SY() list (id = position)."""
+    names = re.findall(r"^\s*SY\(\s*\w+,\s*(\w+),", open(path).read(), re.M)
+    return {n.lower(): i for i, n in enumerate(names)}
 
 
 def crc8(data):
@@ -119,8 +133,9 @@ def parse_osc(data):
 
 # ---- OSC -> events ---------------------------------------------------------------------------
 class Mapper:
-    def __init__(self, params):
+    def __init__(self, params, synth=None):
         self.params = params
+        self.synth = synth if synth is not None else load_synth_params()
 
     def __call__(self, addr, args):
         n = [int(round(a)) if isinstance(a, (int, float)) else 0 for a in args]
@@ -143,6 +158,13 @@ class Mapper:
             return [event(EV_STOP)]
         if addr == "/clock":
             return [event(EV_CLOCK)]
+        if addr == "/synth/note" and len(n) >= 2:
+            return [event(EV_NOTE_ON if n[1] > 0 else EV_NOTE_OFF, SYNTH_CHAN, n[0], n[1])]
+        if addr == "/synth/degree" and len(n) >= 2:
+            return [event(EV_SYN_NOTE, 0, max(0, min(127, 64 + n[0])), max(0, min(127, n[1])))]
+        m = re.match(r"^/synth/(\w+)$", addr)
+        if m and f and m.group(1).lower() in self.synth:
+            return [event(EV_SYN_PARAM, 0, self.synth[m.group(1).lower()], 0, round(f[0] * 65536))]
         m = re.match(r"^/slot/(\d+)/(\w+)$", addr)
         if m:
             slot, name = int(m.group(1)), m.group(2).lower()

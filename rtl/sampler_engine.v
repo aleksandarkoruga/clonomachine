@@ -51,6 +51,8 @@ module sampler_engine #(
     input  wire               fill_valid,
     input  wire [15:0]        fill_data,
 
+    input  wire signed [23:0] synth_in,     // the synth's sample (s24; 0 without it): SYN_SEND
+
     output reg                out_stb,
     output reg signed [23:0]  out_l,        // left / right mix (slot OUT bits)
     output reg signed [23:0]  out_r,
@@ -152,6 +154,13 @@ module sampler_engine #(
     reg [4:0]  pend_stb   [0:N_SLOTS-1];
     reg [15:0] g_master;
     reg [15:0] g_revret;                   // REV_RETURN: u4.12, the plate into the right output
+    reg [15:0] g_synsend;                  // SYN_SEND: u4.12, the synth into the plate
+    // The synth's send: its own multiplier, latched at the tick (the synth finishes its sample
+    // ~140 cycles after the tick, so this is the previous one: one sample later into the plate
+    // whatever delays the engine's start), then the send mix starts from it instead of 0.
+    reg  signed [23:0] syn_q;
+    reg  signed [40:0] syn_p;
+    reg  signed [26:0] syn_fx;
     reg [31:0] g_beatinc;
 
     // ------------------------------------------------------------------ slot state
@@ -523,6 +532,14 @@ module sampler_engine #(
 
     assign cmd_ready = (state == ST_IDLE) && !rst_u && !rst_e;   // none taken while held in reset
     assign tick_out  = (tick_cnt == CYCLES_PER_SAMPLE - 1);
+    always @(posedge clk) begin
+        syn_q <= synth_in;
+        syn_p <= syn_q * $signed({1'b0, g_synsend});
+        if (rst_e)
+            syn_fx <= 0;
+        else if (tick_out)
+            syn_fx <= syn_p >>> 12;
+    end
 
     wire [13:0] c_int = r_interval[cs];
 
@@ -595,6 +612,7 @@ module sampler_engine #(
                     case (cmd_addr[4:0])
                     5'd0: g_master  <= cmd_data[15:0];
                     5'd4: g_revret  <= cmd_data[15:0];
+                    5'd5: g_synsend <= cmd_data[15:0];
                     5'd1: g_beatinc <= cmd_data;
                     5'd2: if (cmd_data[0]) beat <= 64'd0;
                     5'd3: begin
@@ -644,7 +662,7 @@ module sampler_engine #(
                 cs        <= 0;
                 mix_l     <= 0;
                 mix_r     <= 0;
-                mix_fx    <= 0;
+                mix_fx    <= syn_fx;
                 state     <= ST_SLOT;
             end
         end
@@ -1385,6 +1403,7 @@ module sampler_engine #(
             mcnt      <= 0;
             g_master  <= 16'd4096;
             g_revret  <= 16'd0;
+            g_synsend <= 16'd0;
             g_beatinc <= 0;
             pf_wp     <= 0;
             pf_rp     <= 0;

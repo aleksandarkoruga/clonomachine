@@ -278,15 +278,107 @@ static int run(const Scenario& sc, const wt::Table& T) {
     return ok ? 0 : 1;
 }
 
+
+// A lvl write drops the cached frames (another table at the same frame size must not play the
+// old one's frames), and mode [15] with fresh restarts the phases from ph0. Voice 0, oscillator A:
+// table T, then T2 at the same level (same frame size, other words), then a phase restart.
+static int run_switch(const wt::Table& T, const wt::Table& T2, uint32_t base2) {
+    top = new Vsynth_osc;
+    cyc = 0;
+    reqq.clear();
+    serveAt = -1;
+    wordIdx = 0;
+    top->rst = 1;
+    for (int i = 0; i < 4; ++i)
+        cycle();
+    top->rst = 0;
+    const double f = 330, fsH = 96000.0;
+    int L = wt::level_for(T, f, 43200);
+    while (T.size(L) > 1024)
+        ++L;
+    const int logn = __builtin_ctz(T.size(L));
+    const uint32_t inc = uint32_t(std::llrint(f / fsH * 4294967296.0));
+    const double pos = 0.5;
+    wosc(0, 0, inc);
+    wosc(0, 4, 65536);
+    wosc(0, 8, uint32_t(std::lrint(pos * (T.frames - 1) * 65536)));
+    wosc(0, 9, T.base[L] | uint32_t(logn) << 25);
+    wosc(0, 15, 65536);
+    wosc(0, 16, T.frames - 1);
+    wosc(0, 10, 1 << 12 | 1 << 13 | 1 << 14);
+    for (int v = 0; v < 3; ++v) {
+        wvoice(v, 1, 0);
+        wvoice(v, 2, 0);
+        wvoice(v, 3, 0);
+    }
+    const int nSwitch = 150, nReset = 300, N = 450;
+    const uint32_t ph0 = 0x10000;   // a quarter cycle (x 2^14)
+    uint32_t p32 = 0;
+    const wt::Table* cur = &T;
+    std::vector<double> rtl, ref;
+    int firstSound = -1;
+    for (int n = 0; n < N; ++n) {
+        if (n == nSwitch) {   // the other table, same level and frame size: no fresh
+            wosc(0, 9, (base2 + T2.base[L]) | uint32_t(logn) << 25);
+            cur = &T2;
+        }
+        if (n == nReset) {    // a note's restart: fresh + phase restart from ph0
+            wosc(0, 20, ph0);
+            wosc(0, 10, 1 << 12 | 1 << 13 | 1 << 14 | 1 << 15);
+            p32 = ph0 << 14;
+        }
+        top->start = 1;
+        cycle();
+        int c = 0;
+        while (top->busy && c < 4000)
+            cycle(), ++c;
+        for (int s = 0; s < 2; ++s) {
+            top->out_ra = s << 2;
+            cycle();
+            cycle();
+            c += 2;
+            rtl.push_back((int32_t(top->out_filt << 8) >> 8) / 32768.0);
+            const double fpos = std::round(pos * (cur->frames - 1)) / (cur->frames - 1);
+            ref.push_back(read_table(*cur, L, fpos, p32 / 4294967296.0, Interp::SINC8) * cur->qscale);
+            p32 += inc;
+        }
+        while (c < 1023)
+            cycle(), ++c;
+        if (firstSound < 0 && std::fabs(rtl.back()) > 0)
+            firstSound = n;
+    }
+    // compare: before the switch (after the start-up), after it (once the frame is in), after the reset
+    auto snr = [&](int a, int b) {
+        double se = 0, ss = 0;
+        for (int i = 2 * a; i < 2 * b; ++i) {
+            se += (rtl[i] - ref[i]) * (rtl[i] - ref[i]);
+            ss += ref[i] * ref[i];
+        }
+        return se > 0 ? 10 * std::log10(ss / se) : 200.0;
+    };
+    const double s0 = snr(firstSound + 4, nSwitch), s1 = snr(nSwitch + 12, nReset), s2 = snr(nReset, N);
+    int gap = 0;   // silent sub-samples while the new table's frame loads (none: the old one plays on)
+    for (int i = 2 * nSwitch; i < 2 * (nSwitch + 12); ++i)
+        gap += rtl[i] == 0;
+    std::printf("%-18s before %.1f dB, after the table switch %.1f dB (silent sub-samples %d), after the phase "
+                "restart %.1f dB\n", "lvl_switch_phase", s0, s1, gap, s2);
+    delete top;
+    return (s0 > 65 && s1 > 65 && s2 > 65 && gap == 0) ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
     const std::string only = argc > 1 ? argv[1] : "";
     wt::Table T = wt::builtin("basic", 64, 2048, 256);
+    wt::Table T2 = wt::builtin("pwm", 64, 2048, 256);   // a second table behind it (lvl_switch_phase)
     // SDRAM: the table's levels at word 0 (scaled like the s16 copy)
-    mem.assign(T.words + 4096, 0);
+    mem.assign(T.words + T2.words + 4096, 0);
     for (int k = 0; k < T.levels; ++k)
         for (size_t i = 0; i < T.q[k].size(); ++i)
             mem[T.base[k] + i] = uint16_t(T.q[k][i]);
+    for (int k = 0; k < T2.levels; ++k)
+        for (size_t i = 0; i < T2.q[k].size(); ++i)
+            mem[T.words + T2.base[k] + i] = uint16_t(T2.q[k][i]);
     std::vector<Scenario> scs;
     {
         Scenario s{"plain_saw", 300};
@@ -365,6 +457,8 @@ int main(int argc, char** argv) {
     for (auto& sc : scs)
         if (only.empty() || only == sc.name)
             fails += run(sc, T);
+    if (only.empty() || only == "lvl_switch_phase")
+        fails += run_switch(T, T2, T.words);
     std::printf(fails ? "%d FAILED\n" : "ALL PASS\n", fails);
     return fails ? 1 : 0;
 }

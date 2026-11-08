@@ -169,10 +169,11 @@ const CUTTER = [ /* the cutter channel's CC 16.., each 0..127 */
   ["silences", "0 none · 1 .. 126 per phrase · 127 no limit (1 at start-up)", "Most drops and staccato gaps in a phrase; a release that drops out keeps one for itself."],
   ["samples", "< 64 drum page's only · ≥ 64 the cutter may switch", "Whether the cutter only plays the sample the drum page (or OSC) picks, or may swap to its neighbours."],
   ["arrangement", "0 the loop's own order .. 127 all arranged (127 at start-up)", "How many hits read from the re-arranged loop (progress + bar offset + metric stability) instead of where the loop would be; the cuts act on top."],
+  ["preset", "0 .. 127 over 7: straight, edits, jungle, drill, tape, v13, texture", "Sets every knob (on a change of preset only)."],
 ];
 const CUTTER_MORE = [
   ["mod wheel", "0 .. 127", "Release, like its CC."],
-  ["notes", "note number mod 7", "Presets: straight, edits, jungle, drill, tape, v13, texture."],
+  ["notes", "note number 0 .. 127", "The rhythmic intensity (the syncopation knob): low numbers hit the strong 16ths, high ones the weak; the phrase's remaining bars take it at once."],
   ["pitch bend", "≥ 69 of 127: auto", "Above the centre the conductor plays the form, below it you do."],
 ];
 const FIELD_INFO = {
@@ -188,8 +189,95 @@ const FIELD_INFO = {
   clockFollow: ["on / off", "The global tempo follows incoming MIDI clock."],
   cutterChannel: ["none, 1 .. 16", "Channel passed on to the ESP32 break cutter."],
   reverbChannel: ["none, 1 .. 16", "Channel of the plate reverb's page."],
+  synthChannel: ["none, 1 .. 16", "Channel of the wavetable synth's page: its notes play the synth."],
+  synthPb: ["bend, or a parameter (its 7 coarse bits)", "Pitch bend: 'bend' bends by bendRange."],
 };
-let model = null, names = { controls: [], reverb: [] }, loaded = "", es = null, refOpen = true;
+
+/* the wavetable synth's parameters: ranges from include/synth_params.h (the server reads it),
+   what they do from here (fw/synth_ctl.c, esp/harmony) */
+const SYN_SOURCES = ["none", "env1", "env2", "env3", "lfo1", "lfo2", "lfo3", "lfo4", "vel", "note", "rand",
+                     "macro1", "macro2", "macro3", "macro4", "modwheel", "aftertouch"];
+const WARPS = ["off", "sync", "sync window", "bend+", "bend-", "bend+-", "pwm", "asym+", "asym-", "asym+-", "flip",
+               "mirror", "quantize", "odd/even", "fm (from the other)", "fm from sub", "fm from noise", "am", "rm", "thru-zero fm"];
+const SYN_DESC = {
+  volume: "Synth volume (with envelope 1 and the velocity).",
+  mono: "One voice; with legato the next note glides without a new attack.",
+  legato: "Mono: overlapping notes don't restart the envelopes.",
+  porta: "Glide time between notes (0 off).",
+  portaAlways: "Glide also between separate notes (poly too).",
+  bendRange: "Pitch bend range in semitones (or scale steps through the tuning's pitch).",
+  pitch: "Pitch offset of the whole synth (also a mod destination: vibrato).",
+  noteOffset: "Added to the MIDI note of held and new notes: an LFO on this CC is an arpeggiator (in scale degrees with scaleMap).",
+  arpRetrig: "On: each noteOffset step restarts the envelopes.",
+  scale: "Scale (the CC value is the index; console 'synth scales' lists them). Used by scaleMap and the harmony generator.",
+  tuning: "Tuning (the CC value is the index): just, Pythagorean, meantones, equal divisions, Partch 43, Bohlen-Pierce ...",
+  root: "Key: semitones above C. Degree 0 sits on MIDI 60 + root.",
+  scaleMap: "On: consecutive MIDI keys are consecutive scale degrees (key 60 = the root).",
+  fxSend: "Send into the plate reverb.",
+  modwheel: "Mod source (the mod wheel's default target).", aftertouch: "Mod source (aftertouch's default target).",
+  cutoff: "Filter cutoff of the four slots (each with its own offset), key tracked by filtKey.",
+  res: "Filter resonance (all slots).", drive: "Filter input gain 1 .. 8.",
+  morphX: "Morph between the slots: X 0 = slots 1 / 3, 1 = slots 2 / 4 (equal power).",
+  morphY: "Morph between the slots: Y 0 = slots 1 / 2, 1 = slots 3 / 4.",
+  filtOn: "Off: everything bypasses the filter.", filtKey: "Cutoff follows the note: 1 = an octave per octave.",
+  subOn: "The sub oscillator (sine or triangle, octaves below).", subShape: "0 sine, 1 triangle.",
+  noiseOn: "White noise.",
+  harmony: "On: the ESP32 harmony generator plays the voices (chords in scale degrees with cadences); MIDI notes are ignored then.",
+  harmBeats: "Beats per chord step (the functions often stay, so chords change less often).",
+  harmPhrase: "Chord steps per phrase; the last ones make its cadence.",
+  harmOctave: "Register of the chords, octaves.", harmVoices: "Notes per chord (1 .. 3 voices).",
+  harmGate: "Note length as a fraction of the step; 1 = held (only changed voices move).",
+  harmVel: "Velocity of the chords.", harmMelody: "On: the generated melody moves the chord roots (as in the SuperCollider version).",
+  harmSeed: "A new melody from this seed (the same seed, the same melody).",
+};
+function synDesc(name) {
+  if (SYN_DESC[name]) return SYN_DESC[name];
+  let m;
+  if ((m = name.match(/^([ab])(.+)$/)) && /^[A-Z]/.test(m[2])) {
+    const o = "Oscillator " + m[1].toUpperCase() + ": ", k = m[2];
+    const d = { On: "on / off.", Table: "wavetable (the CC value is the index; console 'synth tables'); loads in the background.",
+      Level: "level.", Oct: "octaves.", Semi: "semitones.", Fine: "cents.", Pos: "table position (frames).",
+      Smooth: "crossfade between frames (else stepped).", Warp: "warp 1: " + WARPS.map((w, i) => i + " " + w).join(", ") + ".",
+      WarpAmt: "warp 1 amount.", Warp2: "warp 2 (same list).", Warp2Amt: "warp 2 amount.", Unison: "unison voices.",
+      Detune: "unison detune (the outer pair at ±amount² × 2 semitones).", Blend: "centre vs side unison voices.",
+      Phase: "start phase.", Rand: "phase randomness per note (1: free running).", Filt: "through the filter (else around it)." }[k];
+    if (d) return o + d;
+  }
+  if ((m = name.match(/^env(\d)([AHDSR])$/)))
+    return `Envelope ${m[1]}${m[1] === "1" ? " (amplitude)" : ""}: ` + { A: "attack", H: "hold", D: "decay", S: "sustain level", R: "release" }[m[2]] + ".";
+  if ((m = name.match(/^lfo(\d)(\w+)$/)))
+    return `LFO ${m[1]}: ` + { Shape: "0 sine, 1 tri, 2 saw down, 3 saw up, 4 square, 5 S&H (in between crossfades)",
+      Rate: "rate, Hz (synced: cycles per beat, powers of two)", Sync: "rate in beats", Mode: "0 restarts per note, 1 one cycle, 2 free",
+      Rise: "fade-in time", Delay: "delay before it starts", Phase: "start phase" }[m[2]] + ".";
+  if ((m = name.match(/^mod(\d)(Src|Dst|Amt)$/))) {
+    const dst = (names.synth || []).filter(n => names.synthInfo && names.synthInfo[n] && names.synthInfo[n].mod);
+    return `Mod slot ${m[1]}: ` + { Src: "source: " + SYN_SOURCES.map((s, i) => i + " " + s).join(", "),
+      Dst: "destination: 0 none, " + dst.map((s, i) => (i + 1) + " " + s).join(", "),
+      Amt: "amount, of the destination's whole range (LFOs swing both ways)" }[m[2]] + ".";
+  }
+  if ((m = name.match(/^slot(\d)(Type|Oct)?$/)))
+    return `Filter slot ${m[1]}: ` + (m[2] === "Type" ? "SVF type: 0 low-pass, 1 band-pass, 2 high-pass, 3 notch." :
+      m[2] === "Oct" ? "cutoff offset, octaves." : "model: 0 clean SVF, 1 Moog ladder, 2 TB-303 diode ladder.");
+  if ((m = name.match(/^macro(\d)$/))) return `Macro ${m[1]}: a mod source.`;
+  return names.synthInfo && names.synthInfo[name] && names.synthInfo[name].note || "";
+}
+function fnum(v) { return (Math.round(v * 1000) / 1000).toString(); }
+function synthInfo(name) {
+  if (name === "none") return ["–", "Not used."];
+  if (name === "bend") return ["14 bit (the Machinedrum: 7), centre = none", "Pitch bend by bendRange."];
+  const i = names.synthInfo && names.synthInfo[name];
+  if (!i) return ["?", "Not known to this editor."];
+  const unit = /^(env|lfo\d(Rise|Delay)|porta)/.test(name) ? " s" : name === "cutoff" ? " Hz" : "";
+  let r;
+  if (i.kind === "int") {
+    if (i.lo === 0 && i.hi === 1) r = SWITCH;
+    else if (i.hi === 127 && i.lo === 0) r = /^(scale|tuning|aTable|bTable)$/.test(name) ? "the CC value = the index" : "0 .. 127";
+    else r = `${fnum(i.lo)} .. ${fnum(i.hi)} in ${i.hi - i.lo + 1} steps`;
+  } else r = `${fnum(i.lo)} .. ${fnum(i.hi)}${unit}, ` + (i.kind === "exp" ? "exponential" : i.kind === "cube" ? "curved (fine near 0)" : "linear");
+  return [r + (i.mod ? " · mod target" : ""), synDesc(name)];
+}
+const SYNTH_INFO = new Proxy({}, { get: (_, k) => typeof k === "string" ? synthInfo(k) : undefined });
+let model = null, names = { controls: [], reverb: [], synth: [], synthInfo: {} }, loaded = "", es = null, refOpen = true;
 const $ = id => document.getElementById(id);
 
 function status(text, cls) { const s = $("status"); s.textContent = text; s.className = "status " + (cls || ""); }
@@ -333,6 +421,26 @@ function render() {
     knobTable(c, rv, R, I);
     cards.append(c);
   }
+  const sy = model.synth;
+  if (sy) {
+    const c = card("Wavetable synth", sy.channel ? `channel ${sy.channel}` : "off", sy.channel);
+    c.dataset.kind = "synth";
+    const g = document.createElement("div"); g.className = "fields";
+    const F = FIELD_INFO, S = names.synth && names.synth.length ? names.synth : ["none", "bend"], I = SYNTH_INFO;
+    const ch = document.createElement("select"); chanOptions(ch, sy.channel, true); ch.onchange = () => { sy.channel = +ch.value; touch(); };
+    field(g, "channel", ch, null, F.synthChannel);
+    field(g, "first CC", num(sy.cc, 0, 127, 1, v => sy.cc = v), null, F.cc);
+    field(g, "mod wheel", controlSelect(S, I, sy, sy.mw, v => sy.mw = v), "mw", F.mw);
+    field(g, "aftertouch", controlSelect(S, I, sy, sy.at, v => sy.at = v), "at", F.at);
+    field(g, "pitch bend", controlSelect(S, I, sy, sy.pb, v => sy.pb = v), "pb", F.synthPb);
+    c.append(g);
+    knobTable(c, sy, S.filter(n => n !== "bend"), I);
+    const n = document.createElement("div"); n.className = "note";
+    n.textContent = "Notes on this channel play the synth (velocity: its level) unless the harmony generator is on. " +
+      "The same parameters by OSC: /synth/<name> <value> in their units (host/osc_bridge.py).";
+    c.append(n);
+    cards.append(c);
+  }
   if (model.cutterChannel) {
     const c = card("Break cutter (ESP32)", `channel ${model.cutterChannel}`, model.cutterChannel);
     c.dataset.kind = "cutter";
@@ -371,14 +479,17 @@ function reference() {
   for (const k of listed(names.controls, CONTROL_INFO)) row(k, info(CONTROL_INFO, k, null));
   sec("Plate reverb page (MIDI 0 .. 127)");
   for (const k of listed(names.reverb, REVERB_INFO)) row(k, info(REVERB_INFO, k, null));
-  sec("Break cutter channel: CC 16 .. 26, then mod wheel, notes, pitch bend");
+  sec("Wavetable synth page (MIDI 0 .. 127 over each range)");
+  for (const k of (names.synth || []).filter(k => k !== "none")) row(k, synthInfo(k));
+  sec("Break cutter channel: CC 16 .. 30, then mod wheel, notes, pitch bend");
   CUTTER.forEach(([n, r, s], i) => row(`CC ${16 + i} ${n}`, [r, s]));
   for (const [n, r, s] of CUTTER_MORE) row(n, [r, s]);
   sec("Page and global settings");
   for (const [k, label] of [["channel", "channel"], ["voice", "voice"], ["cc", "first CC"], ["rate", "rate"],
                             ["velocity", "velocity"], ["noteOff", "note-off cuts"], ["mw", "mod wheel"],
                             ["at", "aftertouch"], ["pb", "pitch bend"], ["clockFollow", "follow MIDI clock"],
-                            ["cutterChannel", "cutter channel"], ["reverbChannel", "reverb channel"]])
+                            ["cutterChannel", "cutter channel"], ["reverbChannel", "reverb channel"],
+                            ["synthChannel", "synth channel"]])
     row(label, FIELD_INFO[k]);
   d.append(t);
   c.append(d);
@@ -393,6 +504,18 @@ function checks() {
   if (model.reverb && model.reverb.channel) {
     if (whole.has(model.reverb.channel)) w.push(`channel ${model.reverb.channel}: the reverb and the cutter (the reverb wins)`);
     whole.set(model.reverb.channel, "the reverb");
+  }
+  const sy = model.synth;
+  if (sy && sy.channel) {
+    if (model.reverb && model.reverb.channel === sy.channel) w.push(`channel ${sy.channel}: the synth and the reverb (the reverb wins)`);
+    else {
+      if (model.cutterChannel === sy.channel) w.push(`channel ${sy.channel}: the synth and the cutter (the synth wins)`);
+      whole.set(sy.channel, "the synth");
+    }
+    sy.knobs.forEach((k, i) => { if (sy.cc + i > 127) w.push(`synth: ${k} would be CC ${sy.cc + i}`); });
+    if (sy.mw !== "none" && sy.cc <= 1 && sy.cc + sy.knobs.length > 1) w.push(`synth: CC 1 is the mod wheel (${sy.mw}) and a knob`);
+    const seen = new Set();
+    sy.knobs.forEach(k => { if (k !== "none" && seen.has(k)) w.push(`synth: ${k} is on two CCs`); seen.add(k); });
   }
   const firstOn = new Map();
   model.pages.forEach(p => {

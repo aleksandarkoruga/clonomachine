@@ -13,6 +13,8 @@
 #include "samples.h"
 #include "slot.h"
 #include "midimap.h"
+#include "synth.h"
+#include "../include/synth_params.h"
 
 /* ---- boot-time LUTs (soft-float only here) ---------------------------------------- */
 #include "dmath.h"
@@ -134,7 +136,21 @@ static void raw_param(int s, int p, int32_t v) {
     }
 }
 
+static struct midimap g_mm;
+
 void mapping_event(const struct smp_event* e) {
+    if (e->type == EV_SYN_NOTE || e->type == EV_SYN_PARAM) { /* the harmony generator, OSC */
+        synth_event(e);
+        return;
+    }
+    if (g_mm.synth.chan != 0xFF && e->chan == g_mm.synth.chan && e->type <= EV_BEND) { /* the synth's channel */
+        static const uint8_t st[] = {0x90, 0x80, 0xB0, 0xC0, 0xE0};
+        if (e->type == EV_BEND)
+            synth_midi(&g_mm.synth, (uint8_t)(0xE0 | e->chan), (uint8_t)(e->value & 127), (uint8_t)((e->value >> 7) & 127));
+        else
+            synth_midi(&g_mm.synth, (uint8_t)(st[e->type] | e->chan), e->a, e->b);
+        return;
+    }
     const int s = chan_to_slot(e->chan);
     switch (e->type) {
     case EV_NOTE_ON:
@@ -200,7 +216,6 @@ void mapping_event(const struct smp_event* e) {
  * the loop / transients; the velocity drives the page's "velocity" control, the volume by
  * default), a note-off ends the gate (only for
  * the note that plays). Other channels go through the Monomachine table of mapping_event. */
-static struct midimap g_mm;
 static struct {
     int32_t lut_rate[128];
     int last_note;
@@ -285,6 +300,9 @@ void mapping_midimap_names(void) {
     printf("],\n \"reverb\": [");
     for (int t = 0; t < RK_NUM; ++t)
         printf("%s\"%s\"", t ? ", " : "", rk_names[t]);
+    printf("],\n \"synth\": [\"none\", \"bend\"");
+    for (int t = 0; t < SP_NUM; ++t)
+        printf(", \"%s\"", mm_syn_name(t));
     printf("]}\n>>>NAMES\n");
 }
 
@@ -502,6 +520,10 @@ void mapping_midi_at(uint8_t st, uint8_t d1, uint8_t d2, uint32_t t) {
             reverb_knob(rv->at, d1 & 127);
         else if (type == 0xE0)
             reverb_knob(rv->pb, d2 & 127); /* the coarse 7 bits */
+        return;
+    }
+    if (g_mm.synth.chan != 0xFF && chan == g_mm.synth.chan) { /* the wavetable synth's page */
+        synth_midi(&g_mm.synth, st, d1, d2);
         return;
     }
     if (g_mm.cutter_chan && chan == g_mm.cutter_chan - 1) { /* the cutter's channel: to the ESP */

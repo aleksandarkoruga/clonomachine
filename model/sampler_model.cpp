@@ -264,6 +264,7 @@ void Engine::write(uint32_t addr, uint32_t data) {
         switch (reg) {
         case SMP_G_MASTER: master = data & 0xFFFF; break;
         case SMP_G_REV_RETURN: revRet = data & 0xFFFF; break;
+        case SMP_G_SYN_SEND: synSend = data & 0xFFFF; break;
         case SMP_G_BEAT_INC: beatInc = data; break;
         case SMP_G_BEAT_CTRL:
             if (data & 1)
@@ -427,7 +428,8 @@ int32_t Engine::mixSlot(int s) {
 }
 
 int32_t Engine::step() {
-    int64_t sumL = 0, sumR = 0, sumFx = 0;
+    int64_t sumL = 0, sumR = 0;
+    int64_t sumFx = (static_cast<int64_t>(synthIn) * synSend) >> 12;   // the synth's send
     for (int s = 0; s < nSlots; ++s) {
         slots[s].step(mem, tab);
         const int32_t o = mixSlot(s);

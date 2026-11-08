@@ -21,6 +21,7 @@
  * second so a restarted ESP catches up.
  */
 #include "esplink.h"
+#include "synth.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -105,6 +106,7 @@ static void send_state(void) {
     send1(EV_OWNER, 0, 0, (uint8_t)g_md_slot0_external, g.n16);
     if (g.base_buf > 0)
         send1(EV_LOAD_BUF, 0, 0, (uint8_t)(g.base_buf - 1), 0);
+    synth_esp_state(); /* the harmony generator's parameters */
 }
 
 static void tick(uint32_t step, int source) {
@@ -226,6 +228,8 @@ void esplink_owner(int slot, int cutter) {
     send1(EV_OWNER, 0, (uint8_t)slot, (uint8_t)cutter, slot == 0 ? (int32_t)slot_sixteenths(0) : 0);
 }
 
+void esplink_syn_param(int p, int32_t v) { send1(EV_SYN_PARAM, 0, (uint8_t)p, 0, v); }
+
 void esplink_forward_midi(uint8_t st, uint8_t d1, uint8_t d2) {
     const uint8_t chan = st & 0xF;
     switch (st & 0xF0) {
@@ -260,6 +264,7 @@ void esplink_transport(int start) { (void)start; }
 void esplink_owner(int slot, int cutter) { (void)slot; (void)cutter; }
 void esplink_base_buf(int buf) { (void)buf; }
 void esplink_forward_midi(uint8_t st, uint8_t d1, uint8_t d2) { (void)st; (void)d1; (void)d2; }
+void esplink_syn_param(int p, int32_t v) { (void)p; (void)v; }
 void esplink_status(void) { printf("esp: no ESP UART in this gateware\n"); }
 int esplink_sim(void) { return 0; }
 void esplink_sim_event(const struct smp_event* e) { mapping_event(e); }

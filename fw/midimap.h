@@ -59,8 +59,22 @@ struct mm_reverb {
     uint8_t mw, at, pb;         /* RK_* targets                             */
 };
 
+/* the wavetable synth's page (fw/synth.c): knobs are synth parameters (include/synth_params.h) */
+#define MM_SYN_KNOBS 64
+#define MM_SYN_NONE  0xFF
+#define MM_SYN_BEND  0xFE           /* pb: pitch bend (bendRange)               */
+struct mm_synth {
+    uint8_t chan;                   /* 0-based MIDI channel, 0xFF none          */
+    uint8_t cc, nknobs;
+    uint8_t knobs[MM_SYN_KNOBS];
+    uint8_t mw, at, pb;             /* parameters, MM_SYN_NONE, MM_SYN_BEND     */
+};
+const char* mm_syn_name(int p);     /* "none" / "bend" / the parameter's name   */
+int mm_syn_of(const char* name);    /* -1 if unknown                            */
+
 struct midimap {
     struct mm_reverb reverb;
+    struct mm_synth synth;
     int npages, clock_follow;
     int cutter_chan;            /* 1..16: MIDI channel forwarded to the ESP's cutter, 0 none */
     struct mm_page page[MM_MAX_PAGES];

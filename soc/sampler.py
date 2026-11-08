@@ -54,7 +54,7 @@ class LineFetcher(LiteXModule):
 
 class Sampler(LiteXModule):
     def __init__(self, platform, dram_port, audio_pads, n_slots=2, cd_audio="audio", with_synth=False,
-                 synth_flog=10):
+                 synth_flog=10, synth_voices=3):
         slot_bits = max(1, (n_slots - 1).bit_length())
 
         # CSRs -------------------------------------------------------------------------------------
@@ -133,6 +133,7 @@ class Sampler(LiteXModule):
         out_r      = Signal(24)
         tick       = Signal()
         rst        = Signal()
+        self.synth_out = Signal((24, True))    # the synth's sample (0 without it): its plate send
         self.comb += rst.eq(ResetSignal(cd_audio) | eng_reset)
         self.specials += Instance("sampler_engine",
             p_N_SLOTS   = n_slots,
@@ -155,6 +156,7 @@ class Sampler(LiteXModule):
             o_req_addr   = e_req_addr,
             i_fill_valid = e_fill_valid,
             i_fill_data  = e_fill_data,
+            i_synth_in   = self.synth_out,
             o_out_stb    = out_stb,
             o_out_l      = out_l,
             o_out_r      = out_r,
@@ -166,7 +168,8 @@ class Sampler(LiteXModule):
         out_r_dac = out_r
         if with_synth:
             self._add_synth(platform, cd_audio, rst, tick, req_fifo, fill_fifo,
-                            e_req_valid, e_req_ready, e_req_addr, e_fill_valid, e_fill_data, synth_flog)
+                            e_req_valid, e_req_ready, e_req_addr, e_fill_valid, e_fill_data, synth_flog,
+                            synth_voices)
             # the synth (mono) joins the right output, the melody channel
             out_r_dac = Signal(24)
             out_r_s = Signal((24, True))
@@ -195,7 +198,7 @@ class Sampler(LiteXModule):
         platform.add_source(os.path.join(RTL_DIR, "dsm_dac.v"))
 
     def _add_synth(self, platform, cd_audio, rst, tick, req_fifo, fill_fifo,
-                   e_req_valid, e_req_ready, e_req_addr, e_fill_valid, e_fill_data, flog):
+                   e_req_valid, e_req_ready, e_req_addr, e_fill_valid, e_fill_data, flog, voices):
         """Wavetable synth prototype: commands through their own FIFO, the line queue shared with
         the engine (line_arb.v), status words through MultiRegs."""
         self.synth_cmd_data  = CSRStorage(32, description="Synth register value (write before SYNTH_CMD_ADDR).")
@@ -224,9 +227,9 @@ class Sampler(LiteXModule):
             o_f0_valid = e_fill_valid, o_f1_valid = s_fill_valid, o_f_data = f_data,
         )
         self.comb += e_fill_data.eq(f_data)
-        self.synth_out = Signal((24, True))
         lag, ocyc, fcyc = Signal(32), Signal(11), Signal(11)
         self.specials += Instance("synth_top",
+            p_NV        = voices,
             p_FLOG      = flog,
             p_SINC_HEX  = os.path.join(RTL_DIR, "sy_sinc.hex"),
             p_FN_HEX    = os.path.join(RTL_DIR, "sy_fn.hex"),
