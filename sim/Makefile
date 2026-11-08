@@ -42,3 +42,38 @@ reverb: obj_rv/Vreverb_unit
 reverbrun: reverb
 	./obj_rv/Vreverb_unit
 .PHONY: reverb reverbrun
+
+# synth oscillator unit vs the synth model's float read:  make synthosc && ./obj_so/Vsynth_osc [scenario]
+SO_RTL = ../rtl/synth_osc.v
+obj_so/Vsynth_osc: $(SO_RTL) tb_synth_osc.cpp ../model/synth_osc.h ../model/synth_warp.h ../model/wt_tables.cpp ../model/wt_tables.h
+	$(VERILATOR) --cc --exe --build -O3 -j 8 --x-assign 0 --x-initial 0 --Mdir obj_so \
+	  -Wno-fatal -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-UNUSEDPARAM -Wno-BLKSEQ \
+	  -GSINC_HEX='"../rtl/sy_sinc.hex"' -GFN_HEX='"../rtl/sy_fn.hex"' \
+	  -CFLAGS "-std=c++20 -O2" $(SO_RTL) tb_synth_osc.cpp ../model/wt_tables.cpp
+synthosc: obj_so/Vsynth_osc
+synthoscrun: synthosc
+	./obj_so/Vsynth_osc
+.PHONY: synthosc synthoscrun
+
+# synth filter engine vs a float interpreter of its microcode:  make synthfilt && ./obj_sf/Vsynth_filt
+SF_RTL = ../rtl/synth_filt.v
+obj_sf/Vsynth_filt: $(SF_RTL) tb_synth_filt.cpp ../model/synth_ucode.h ../rtl/sy_ucode.hex ../rtl/sy_ffn.hex
+	$(VERILATOR) --cc --exe --build -O3 -j 8 --x-assign 0 --x-initial 0 --Mdir obj_sf \
+	  -Wno-fatal -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-UNUSEDPARAM -Wno-BLKSEQ \
+	  -GUCODE_HEX='"../rtl/sy_ucode.hex"' -GFFN_HEX='"../rtl/sy_ffn.hex"' \
+	  -CFLAGS "-std=c++20 -O2" $(SF_RTL) tb_synth_filt.cpp
+synthfilt: obj_sf/Vsynth_filt
+synthfiltrun: synthfilt
+	./obj_sf/Vsynth_filt
+.PHONY: synthfilt synthfiltrun
+
+# synth top end to end (oscillators -> filter engine -> mixer -> decimator):  make synthtop && ./obj_st/Vsynth_top
+ST_RTL = ../rtl/synth_top.v ../rtl/synth_osc.v ../rtl/synth_filt.v
+obj_st/Vsynth_top: $(ST_RTL) tb_synth_top.cpp ../model/synth_ucode.h ../model/wt_tables.cpp ../model/synth_analysis.h
+	$(VERILATOR) --cc --exe --build -O3 -j 8 --x-assign 0 --x-initial 0 --Mdir obj_st --top-module synth_top \
+	  -Wno-fatal -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC -Wno-UNUSEDPARAM -Wno-BLKSEQ \
+	  -GSINC_HEX='"../rtl/sy_sinc.hex"' -GFN_HEX='"../rtl/sy_fn.hex"' -GUCODE_HEX='"../rtl/sy_ucode.hex"' \
+	  -GFFN_HEX='"../rtl/sy_ffn.hex"' -GHB_HEX='"../rtl/sy_hb.hex"' \
+	  -CFLAGS "-std=c++20 -O2" $(ST_RTL) tb_synth_top.cpp ../model/wt_tables.cpp
+synthtop: obj_st/Vsynth_top
+.PHONY: synthtop

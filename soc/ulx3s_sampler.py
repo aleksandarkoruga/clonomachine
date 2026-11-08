@@ -116,7 +116,8 @@ def pll_out_freq(pll, n=0):
 
 class SamplerSoC(SoCCore):
     def __init__(self, device="LFE5U-85F", revision="2.0", sys_clk_freq=45e6, audio_clk_freq=49.152e6,
-                 sdram_module="MT48LC16M16", n_slots=2, with_usb_host=True, **kwargs):
+                 sdram_module="MT48LC16M16", n_slots=2, with_usb_host=True, with_synth=False, synth_flog=10,
+                 **kwargs):
         platform = radiona_ulx3s.Platform(device=device, revision=revision, toolchain="trellis")
         platform.add_extension(_esp_io)
 
@@ -153,7 +154,8 @@ class SamplerSoC(SoCCore):
 
         # Sampler ----------------------------------------------------------------------------------
         port = self.sdram.crossbar.get_port(mode="read")
-        self.sampler = Sampler(platform, port, platform.request("audio"), n_slots=n_slots)
+        self.sampler = Sampler(platform, port, platform.request("audio"), n_slots=n_slots, with_synth=with_synth,
+                               synth_flog=synth_flog)
         self.platform.add_period_constraint(self.crg.cd_audio.clk, 1e9 / audio_clk_freq)
         self.platform.add_false_path_constraints(self.crg.cd_sys.clk, self.crg.cd_audio.clk)
 
@@ -195,6 +197,10 @@ def main():
         help="MT48LC16M16 / IS42S16160 (32 MB) or AS4C32M16 (64 MB, ULX3S v3.1.x)")
     parser.add_target_argument("--n-slots",      default=3, type=int)
     parser.add_target_argument("--flash",        action="store_true", help="Write the bitstream to SPI flash.")
+    parser.add_target_argument("--with-synth",   action="store_true",
+        help="Add the wavetable synth prototype (rtl/synth_top.v) beside the engine.")
+    parser.add_target_argument("--synth-flog",   default=10, type=int,
+        help="Synth frame cache size log2 (10: 1024-sample frames, 9: 512).")
     # seed 9 (audio 62.4 / sys 49.4 MHz at 45 MHz). With the engine, PV and plate pipelined
     # a 9-seed sweep gave audio 55.3-57.5 MHz (>= 12 % over 49.15), sys 45.6-49.6
     # (scripts/seed_sweep.sh), so the seed is no longer critical
@@ -207,6 +213,8 @@ def main():
         sys_clk_freq = args.sys_clk_freq,
         sdram_module = args.sdram_module,
         n_slots      = args.n_slots,
+        with_synth   = args.with_synth,
+        synth_flog   = args.synth_flog,
         **parser.soc_argdict,
     )
     builder = Builder(soc, **parser.builder_argdict)

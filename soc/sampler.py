@@ -53,7 +53,8 @@ class LineFetcher(LiteXModule):
 
 
 class Sampler(LiteXModule):
-    def __init__(self, platform, dram_port, audio_pads, n_slots=2, cd_audio="audio"):
+    def __init__(self, platform, dram_port, audio_pads, n_slots=2, cd_audio="audio", with_synth=False,
+                 synth_flog=10):
         slot_bits = max(1, (n_slots - 1).bit_length())
 
         # CSRs -------------------------------------------------------------------------------------
@@ -111,6 +112,21 @@ class Sampler(LiteXModule):
             MultiReg(self.ctrl.fields.reset,    eng_reset, cd_audio),
         ]
 
+        # Line queue clients: the engine, and the synth when there is one ----------------------------
+        e_req_valid = Signal()
+        e_req_ready = Signal()
+        e_req_addr  = Signal(25)
+        e_fill_valid = Signal()
+        e_fill_data  = Signal(16)
+        if not with_synth:
+            self.comb += [
+                req_fifo.sink.valid.eq(e_req_valid),
+                e_req_ready.eq(req_fifo.sink.ready),
+                req_fifo.sink.addr.eq(e_req_addr),
+                e_fill_valid.eq(fill_fifo.source.valid),
+                e_fill_data.eq(fill_fifo.source.data),
+            ]
+
         # Engine -----------------------------------------------------------------------------------
         out_stb    = Signal()
         out_l      = Signal(24)
@@ -134,11 +150,11 @@ class Sampler(LiteXModule):
             o_cmd_ready  = cmd_fifo.source.ready,
             i_cmd_addr   = cmd_fifo.source.addr,
             i_cmd_data   = cmd_fifo.source.data,
-            o_req_valid  = req_fifo.sink.valid,
-            i_req_ready  = req_fifo.sink.ready,
-            o_req_addr   = req_fifo.sink.addr,
-            i_fill_valid = fill_fifo.source.valid,
-            i_fill_data  = fill_fifo.source.data,
+            o_req_valid  = e_req_valid,
+            i_req_ready  = e_req_ready,
+            o_req_addr   = e_req_addr,
+            i_fill_valid = e_fill_valid,
+            i_fill_data  = e_fill_data,
             o_out_stb    = out_stb,
             o_out_l      = out_l,
             o_out_r      = out_r,
@@ -147,8 +163,24 @@ class Sampler(LiteXModule):
             o_stat_addr  = stat_wp.adr,
             o_stat_data  = stat_wp.dat_w,
         )
+        out_r_dac = out_r
+        if with_synth:
+            self._add_synth(platform, cd_audio, rst, tick, req_fifo, fill_fifo,
+                            e_req_valid, e_req_ready, e_req_addr, e_fill_valid, e_fill_data, synth_flog)
+            # the synth (mono) joins the right output, the melody channel
+            out_r_dac = Signal(24)
+            out_r_s = Signal((24, True))
+            s = Signal((26, True))
+            self.comb += [
+                out_r_s.eq(out_r),
+                s.eq(out_r_s + self.synth_out),
+                If(s > (1 << 23) - 1, out_r_dac.eq((1 << 23) - 1)
+                ).Elif(s < -(1 << 23), out_r_dac.eq(-(1 << 23))
+                ).Else(out_r_dac.eq(s)),
+            ]
+
         # one delta-sigma DAC per jack channel; each slot's OUT register picks left / right / both
-        for sample, pad in ((out_l, audio_pads.l), (out_r, audio_pads.r)):
+        for sample, pad in ((out_l, audio_pads.l), (out_r_dac, audio_pads.r)):
             self.specials += Instance("dsm_dac",
                 i_clk    = ClockSignal(cd_audio),
                 i_rst    = rst,
@@ -161,3 +193,57 @@ class Sampler(LiteXModule):
         platform.add_source(os.path.join(RTL_DIR, "pv_unit.v"))
         platform.add_source(os.path.join(RTL_DIR, "reverb_unit.v"))
         platform.add_source(os.path.join(RTL_DIR, "dsm_dac.v"))
+
+    def _add_synth(self, platform, cd_audio, rst, tick, req_fifo, fill_fifo,
+                   e_req_valid, e_req_ready, e_req_addr, e_fill_valid, e_fill_data, flog):
+        """Wavetable synth prototype: commands through their own FIFO, the line queue shared with
+        the engine (line_arb.v), status words through MultiRegs."""
+        self.synth_cmd_data  = CSRStorage(32, description="Synth register value (write before SYNTH_CMD_ADDR).")
+        self.synth_cmd_addr  = CSRStorage(13, description="Writing pushes {SYNTH_CMD_ADDR, SYNTH_CMD_DATA} to the synth.")
+        self.synth_cmd_ready = CSRStatus(1,  description="1 when the synth command FIFO can take a write.")
+        self.synth_lag       = CSRStatus(32, description="Oscillator-samples played away from the wanted frames.")
+        self.synth_cycles    = CSRStatus(22, description="Most cycles per sample: [10:0] oscillators, [21:11] filter.")
+        sfifo = stream.AsyncFIFO([("addr", 13), ("data", 32)], depth=64, buffered=False)
+        sfifo = ClockDomainsRenamer({"write": "sys", "read": cd_audio})(sfifo)
+        self.synth_fifo = sfifo
+        self.comb += [
+            sfifo.sink.valid.eq(self.synth_cmd_addr.re),
+            sfifo.sink.addr.eq(self.synth_cmd_addr.storage),
+            sfifo.sink.data.eq(self.synth_cmd_data.storage),
+            self.synth_cmd_ready.status.eq(sfifo.sink.ready),
+        ]
+        s_req_valid, s_req_ready, s_req_addr = Signal(), Signal(), Signal(25)
+        s_fill_valid = Signal()
+        f_data = Signal(16)
+        self.specials += Instance("line_arb",
+            i_clk = ClockSignal(cd_audio), i_rst = rst,
+            i_r0_valid = e_req_valid, o_r0_ready = e_req_ready, i_r0_addr = e_req_addr,
+            i_r1_valid = s_req_valid, o_r1_ready = s_req_ready, i_r1_addr = s_req_addr,
+            o_req_valid = req_fifo.sink.valid, i_req_ready = req_fifo.sink.ready, o_req_addr = req_fifo.sink.addr,
+            i_fill_valid = fill_fifo.source.valid, i_fill_data = fill_fifo.source.data,
+            o_f0_valid = e_fill_valid, o_f1_valid = s_fill_valid, o_f_data = f_data,
+        )
+        self.comb += e_fill_data.eq(f_data)
+        self.synth_out = Signal((24, True))
+        lag, ocyc, fcyc = Signal(32), Signal(11), Signal(11)
+        self.specials += Instance("synth_top",
+            p_FLOG      = flog,
+            p_SINC_HEX  = os.path.join(RTL_DIR, "sy_sinc.hex"),
+            p_FN_HEX    = os.path.join(RTL_DIR, "sy_fn.hex"),
+            p_UCODE_HEX = os.path.join(RTL_DIR, "sy_ucode.hex"),
+            p_FFN_HEX   = os.path.join(RTL_DIR, "sy_ffn.hex"),
+            p_HB_HEX    = os.path.join(RTL_DIR, "sy_hb.hex"),
+            i_clk = ClockSignal(cd_audio), i_rst = rst, i_tick = tick,
+            i_cmd_valid = sfifo.source.valid, o_cmd_ready = sfifo.source.ready,
+            i_cmd_addr = sfifo.source.addr, i_cmd_data = sfifo.source.data,
+            o_req_valid = s_req_valid, i_req_ready = s_req_ready, o_req_addr = s_req_addr,
+            i_fill_valid = s_fill_valid, i_fill_data = f_data,
+            o_out = self.synth_out,
+            o_lag = lag, o_osc_cyc_max = ocyc, o_filt_cyc_max = fcyc,
+        )
+        self.specials += [
+            MultiReg(lag, self.synth_lag.status, "sys"),
+            MultiReg(Cat(ocyc, fcyc), self.synth_cycles.status, "sys"),
+        ]
+        for f in ("synth_top.v", "synth_osc.v", "synth_filt.v", "line_arb.v"):
+            platform.add_source(os.path.join(RTL_DIR, f))

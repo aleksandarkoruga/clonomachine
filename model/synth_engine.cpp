@@ -478,11 +478,9 @@ struct Engine::Impl {
                 case W_FLIP: gain *= warp_gain(w, a, p); break;
                 case W_ODDEVEN: oddeven = s; break;
                 case W_SYNCWIN: gain *= warp_gain(w, a, p); p = warp_phase(w, a, p); ++fns; break;
-                case W_BEND_P: case W_BEND_M: case W_BEND_PM: case W_ASYM_P: case W_ASYM_M: case W_ASYM_PM:
-                case W_MIRROR:
+                case W_BEND_P: case W_BEND_M: case W_BEND_PM:
                     p = warp_phase(w, a, p);
-                    fns += 2;  // u^p = exp2(p log2 u): two table functions
-                    macs["osc"] += 1;
+                    macs["osc"] += 2;  // u + a u (1 - u)
                     break;
                 default: p = warp_phase(w, a, p); macs["osc"] += 1; break;
                 }

@@ -92,3 +92,81 @@ for which in (0, 1):
             v = rv_tap(which, k)
             assert -(1 << 17) <= v < (1 << 17), v
             f.write("%05x\n" % (v & 0x3FFFF))
+
+# ---------------- wavetable synth (rtl/synth_osc.v, model/synth_osc.h) ----------------
+# sy_sinc.hex : 2048 x 18 bit two's complement, the 8-tap Kaiser-windowed sinc of
+#               model/synth_osc.h (fc 0.92, beta 7) at phases p = 0..256 (entry p*8 + j, Q1.17,
+#               each phase normalised to unity DC gain); 257*8 = 2056 > 2048, so phase 256 (= phase
+#               0 shifted by one sample) is formed in the RTL from phase 0
+def i0(x):
+    s, t = 1.0, 1.0
+    for k in range(1, 30):
+        t *= x * x / (4.0 * k * k)
+        s += t
+    return s
+SY_T, SY_P = 8, 256
+with open(os.path.join(out, "sy_sinc.hex"), "w") as f:
+    for p in range(SY_P):
+        c = []
+        for j in range(SY_T):
+            x = (j - (SY_T // 2 - 1)) - p / SY_P
+            sx = 0.92 if x == 0 else math.sin(math.pi * 0.92 * x) / (math.pi * x)
+            r = x / (SY_T / 2)
+            w = 0.0 if abs(r) >= 1 else i0(7.0 * math.sqrt(1 - r * r)) / i0(7.0)
+            c.append(sx * w)
+        s = sum(c)
+        for v in c:
+            q = int(round(v / s * 131072))
+            assert -(1 << 17) <= q < (1 << 17), q
+            f.write("%05x\n" % (q & 0x3FFFF))
+
+# sy_fn.hex : 1024 x 18 bit, four 256-entry tables (linear interpolation in the RTL; the entry
+#             after 255 is the constant at the region's end):
+#   [0..255]    log2(1 + i/256)            Q0.17   (end: 1.0)
+#   [256..511]  2^(i/256)                  Q1.16   (end: 2.0)
+#   [512..767]  sin(pi/2 * i/256)          Q0.17   (end: 1.0, saturated to 131071)
+#   [768..1023] tanh(i/32), x in [0, 8)    Q0.17   (end: tanh 8)
+with open(os.path.join(out, "sy_fn.hex"), "w") as f:
+    for i in range(256):
+        f.write("%05x\n" % min(131071, int(round(math.log2(1 + i / 256) * 131072))))
+    for i in range(256):
+        f.write("%05x\n" % int(round(2 ** (i / 256) * 65536)))
+    for i in range(256):
+        f.write("%05x\n" % min(131071, int(round(math.sin(math.pi / 2 * i / 256) * 131072))))
+    for i in range(256):
+        f.write("%05x\n" % min(131071, int(round(math.tanh(i / 32) * 131072))))
+
+# sy_ffn.hex : 1024 x 18 bit, the filter engine's function unit (rtl/synth_filt.v), linear
+#              interpolation between entries i and i+1 of a region:
+#   [0..256]    tanh(i/32), x in [0, 8]           Q0.17 (saturated to 131071)
+#   [512..768]  1/(1 + i/256)                     Q0.17 (entry 0 = 1.0 saturated to 131071)
+with open(os.path.join(out, "sy_ffn.hex"), "w") as f:
+    vals = [0] * 1024
+    for i in range(257):
+        vals[i] = min(131071, int(round(math.tanh(i / 32) * 131072)))
+        vals[512 + i] = min(131071, int(round(131072 / (1 + i / 256))))
+    for v in vals:
+        f.write("%05x\n" % v)
+
+# sy_hb.hex : 19 x 18 bit, the synth's 2x -> 1x half-band decimator (model/synth_dsp.h Halfband(71)):
+#             entry 0 = the centre tap (0.5), entry k = the taps at +-(2k - 1) from it, Q1.17
+def i0b(x):
+    s, t = 1.0, 1.0
+    for k in range(1, 40):
+        t *= x * x / (4.0 * k * k)
+        s += t
+    return s
+HB_LEN, HB_BETA = 71, 8.6
+hb = []
+M = HB_LEN - 1
+for i in range(HB_LEN):
+    x = i - M / 2
+    sv = 0.5 if x == 0 else math.sin(math.pi * 0.5 * x) / (math.pi * x)
+    r = 2.0 * i / M - 1
+    hb.append(sv * i0b(HB_BETA * math.sqrt(max(0.0, 1 - r * r))) / i0b(HB_BETA))
+hs = sum(hb)
+hb = [v / hs for v in hb]
+with open(os.path.join(out, "sy_hb.hex"), "w") as f:
+    f.write("%05x\n" % (int(round(hb[M // 2] * 131072)) & 0x3FFFF))
+    for k in range(1, 19):
+        f.write("%05x\n" % (int(round(hb[M // 2 + 2 * k - 1] * 131072)) & 0x3FFFF))

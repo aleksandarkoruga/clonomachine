@@ -21,7 +21,8 @@ revisions in use are pinned in `deps.lock`.
 | `rtl/sampler_engine.v` | audio engine: 3 slots × 32 grains, per-grain SDRAM line cache, gate, stutter, latency line, algorithm crossfade, stereo mixer (per-slot left/right/both) |
 | `rtl/pv_unit.v` | phase vocoder (Bungee Basic) shared by the slots: FFT, CORDIC, partials, overlap-add rings |
 | `rtl/dsm_dac.v` | 2nd-order ΔΣ → 4-bit R-2R (mode 0) or 1-bit (mode 1), OSR 256; one per jack channel |
-| `rtl/*.hex` | Hann / 2^x / PV sine, CORDIC, synthesis-window ROMs (`scripts/gen_roms.py`) |
+| `rtl/synth_*.v`, `rtl/line_arb.v` | wavetable synth prototype (built with `--with-synth` only): oscillators, filter engine, mixer, SDRAM line arbiter |
+| `rtl/*.hex` | Hann / 2^x / PV sine, CORDIC, synthesis-window ROMs, synth tables (`scripts/gen_roms.py`), synth microcode (`scripts/synth_asm.py`) |
 | `model/` | bit-exact C++ golden models (engine, `pv_model`), float references (BufGrainPlay, `pv_float` = Bungee), `pv_render`, `test_pv_engine`; the wavetable synth model (`synth_*`, `wt_tables`) |
 | `sim/` | Verilator: RTL vs model (`make run`), PV unit job by job (`make pvrun`), DSM spectrum test |
 | `include/sampler_regs.h` | engine register map (RTL, model, firmware) |
@@ -252,6 +253,31 @@ frame cache and SDRAM traffic), and counts what the hardware version costs:
     model/build_synth.sh
     build/synth/synth_render model/synth_songs/filter.txt      # -> build/synth/filter_{ref,hw}.wav
 
+## Wavetable synth prototype (RTL, `--with-synth`)
+
+The model's audio path in hardware, built only with `--with-synth` (the default gateware does not
+contain it). `rtl/synth_osc.v` runs the oscillators as jobs on one datapath: frame caches in
+block RAM filled from SDRAM through `rtl/line_arb.v` (the sampler engine keeps priority on the line
+queue), the warp ALU, the 8-tap sinc read, sub and noise. `rtl/synth_filt.v` is a microcoded
+engine (programs from `scripts/synth_asm.py`): the four filter slots run as threads, the three
+voices as lanes; clean SVF, TB-303 and Moog so far. `rtl/synth_top.v` adds the voice mixer and the
+half-band decimator. The output is mono, added to the right channel. There is no control yet
+(envelopes, LFOs, mod matrix): the soft core can write every register through `synth_cmd_*`, but
+no firmware does.
+
+    cd sim && make synthosc && ./obj_so/Vsynth_osc     # oscillators vs the model's float read
+    cd sim && make synthfilt && ./obj_sf/Vsynth_filt   # filter engine vs a float run of its microcode
+    cd sim && make synthtop && ./obj_st/Vsynth_top     # end to end -> build/synth/top_saw110.wav
+    scripts/ooc/run.sh scripts/ooc/ooc_osc.v osc rtl/synth_osc.v      # one unit alone: area, Fmax
+    python3 soc/ulx3s_sampler.py --build --with-synth --bios-lto --bios-console disable
+
+Out of context the oscillators take 7.1k LUTs, 15 block RAMs and 17 multipliers (70 MHz), the
+filter engine 11.9k LUTs, 4 block RAMs and 15 multipliers (62 MHz). Of the 1024 cycles per sample,
+the oscillators use 925 with 3 voices x 2 oscillators x unison 4, the filter engine 980 with four
+TB-303 slots. In the full gateware it needs 203 of the 208 block RAMs (with the BIOS built with LTO
+and without its console, which frees 9; the boot sequence stays, the prompt goes) and 92 % of the
+logic; routing then takes more than an hour.
+
 ## Board facts (this unit)
 
 ULX3S v3.0.8, LFE5U-85F, SDRAM MT48LC16M16-compatible (32 MB, memtest OK),
@@ -270,4 +296,6 @@ MIT (`LICENSE`), except:
 - FatFs in `fw/fatfs/`: its own BSD-style license (ChaN), in the files;
 - the quad morph filter port `model/synth_qmf.h`, derived from
   [QuadMorphFilter](https://github.com/OTODESK4193/QuadMorphFilter): GNU AGPL 3.0, as stated in the
-  file (the synth model binary links it).
+  file (the synth model binary links it); likewise the synth microcode `scripts/synth_asm.py` with
+  its output `rtl/sy_ucode.hex` (in a gateware built with `--with-synth`) and
+  `sim/tb_synth_filt.cpp`.

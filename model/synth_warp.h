@@ -18,15 +18,15 @@ enum Warp {
     W_OFF = 0,
     W_SYNC,      // hard self-sync: the frame runs 2^(4 w) times per period (up to 16x)
     W_SYNCWIN,   // sync with a sin(pi phi) window (no click at the reset)
-    W_BEND_P,    // each half bent towards the middle (u^p, p = 2^(3w))
-    W_BEND_M,    // each half bent towards the edges (p = 2^(-3w))
-    W_BEND_PM,   // 50 % = unchanged
+    W_BEND_P,    // each half bent: u + a u (1 - u), a = w (towards the middle of the half)
+    W_BEND_M,    // a = -w (towards its edges)
+    W_BEND_PM,   // a = 2w - 1 (50 % = unchanged)
     W_PWM,       // the frame squeezed into (1 - 0.95 w) of the period, its end value held after
-    W_ASYM_P,    // the whole cycle bent (phi^p): a phase-distortion knee
-    W_ASYM_M,
+    W_ASYM_P,    // phase-distortion knee over the whole cycle: the first half of the frame in
+    W_ASYM_M,    //   d = 0.5 - 0.49 w of the period (asym-: 0.5 + 0.49 w; asym+-: 50 % = unchanged)
     W_ASYM_PM,
     W_FLIP,      // polarity flips at 1 - w
-    W_MIRROR,    // forward then backward, each half asym-bent by w
+    W_MIRROR,    // forward then backward, each half with the asym+- knee (50 % = plain mirror)
     W_QUANT,     // the phase held in 2048 * 2^(-10 w) steps
     W_ODDEVEN,   // 0 odd harmonics only, 0.5 unchanged, 1 even only
     W_FM,        // phase modulation by the other oscillator: index 2 w cycles
@@ -46,11 +46,15 @@ inline const char* warp_name(int w) {
 }
 inline bool warp_is_xmod(int w) { return w == W_FM || w == W_AM || w == W_RM || w == W_TZFM; }
 
+// (The reference curves aren't published; third-party measurements map bend to a piecewise-linear
+// squeeze and asym to a smooth whole-cycle bend. These forms take one or two multiplies in the
+// FPGA: rtl/synth_osc.v.)
 namespace detail {
-inline double bend(double u, double p) { return std::pow(std::clamp(u, 0.0, 1.0), p); }
-// slope bound of u^p over u in [eps, 1] (unbounded at 0 for p < 1: the level choice uses the
-// slope at 1/64 of the cycle, beyond that the aliasing is accepted)
-inline double bend_slope(double p) { return p >= 1 ? p : p * std::pow(1.0 / 64, p - 1); }
+inline double knee(double u, double d) { return u < d ? u * 0.5 / d : 0.5 + (u - d) * 0.5 / (1 - d); }
+inline double knee_slope(double d) { return std::max(0.5 / d, 0.5 / (1 - d)); }
+inline double knee_d(int w, double amt) {
+    return w == W_ASYM_P ? 0.5 - 0.49 * amt : w == W_ASYM_M ? 0.5 + 0.49 * amt : 0.5 + 0.49 * (1 - 2 * amt);
+}
 }  // namespace detail
 
 // phase warp: phi in [0, 1) -> [0, 1]; slope = the largest dphi'/dphi
@@ -70,10 +74,10 @@ inline double warp_phase(int w, double amt, double phi, double* slope = nullptr)
     case W_BEND_P:
     case W_BEND_M:
     case W_BEND_PM: {
-        const double e = w == W_BEND_P ? 3 * amt : w == W_BEND_M ? -3 * amt : 3 * (2 * amt - 1);
-        const double p = std::exp2(e);
-        r = phi < 0.5 ? 0.5 * bend(2 * phi, p) : 1 - 0.5 * bend(2 - 2 * phi, p);
-        s = bend_slope(p);
+        const double a = w == W_BEND_P ? amt : w == W_BEND_M ? -amt : 2 * amt - 1;
+        const double u = phi < 0.5 ? 2 * phi : 2 - 2 * phi, b = u + a * u * (1 - u);
+        r = phi < 0.5 ? 0.5 * b : 1 - 0.5 * b;
+        s = 1 + std::fabs(a);
         break;
     }
     case W_PWM: {
@@ -85,17 +89,15 @@ inline double warp_phase(int w, double amt, double phi, double* slope = nullptr)
     case W_ASYM_P:
     case W_ASYM_M:
     case W_ASYM_PM: {
-        const double e = w == W_ASYM_P ? 3 * amt : w == W_ASYM_M ? -3 * amt : 3 * (2 * amt - 1);
-        const double p = std::exp2(e);
-        r = bend(phi, p);
-        s = bend_slope(p);
+        const double d = knee_d(w, amt);
+        r = knee(phi, d);
+        s = knee_slope(d);
         break;
     }
     case W_MIRROR: {
-        const double u = phi < 0.5 ? 2 * phi : 2 - 2 * phi;
-        const double p = std::exp2(3 * (2 * amt - 1));
-        r = bend(u, p);
-        s = 2 * bend_slope(p);
+        const double u = phi < 0.5 ? 2 * phi : 2 - 2 * phi, d = knee_d(W_ASYM_PM, amt);
+        r = std::min(knee(u, d), 0.999999);
+        s = 2 * knee_slope(d);
         break;
     }
     case W_QUANT: {
