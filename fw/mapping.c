@@ -509,8 +509,6 @@ void mapping_midi_at(uint8_t st, uint8_t d1, uint8_t d2, uint32_t t) {
     if (st < 0x80 || st >= 0xF0)
         return;
     const int type = st & 0xF0, chan = st & 0xF;
-    if (type == 0x90 && d2)
-        synth_note_trig(chan); /* the harmony generator's step trigs (harmTrig): any channel */
     if (g_mm.reverb.chan != 0xFF && chan == g_mm.reverb.chan) { /* the plate reverb's page */
         const struct mm_reverb* rv = &g_mm.reverb;
         if (type == 0xB0) {

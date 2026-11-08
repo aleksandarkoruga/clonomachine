@@ -19,9 +19,8 @@ void synth_event(const struct smp_event* e); /* EV_SYN_NOTE, EV_SYN_PARAM */
 void synth_console(int argc, char** argv);   /* console "synth ..." */
 int synth_present(void);
 void synth_esp_state(void);                  /* the harmony generator's parameters to the ESP */
-/* the harmony generator's steps: a note-on on any channel (harmTrig's: a trig), the ESP link's
-   32nd ticks (harmTrig 0: the pending offset's step), start / stop */
-void synth_note_trig(int chan);
+/* the harmony generator's steps (its note-ons step it in synth_midi with harmTrig 1): the ESP
+   link's 32nd ticks (harmTrig 0: the pending offset's step), start / stop */
 void synth_harm_tick(uint32_t step);
 void synth_harm_transport(void);
 

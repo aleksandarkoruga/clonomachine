@@ -300,10 +300,10 @@ channel 9 (its page in `/midimap.json`), by OSC (`/synth/...`) or the console (`
   `harmSeed`. `harmony` 1 plays the chords (MIDI notes on channel 9 wait meanwhile); 2 adds the
   chord's root to the MIDI notes instead, like `noteOffset` (in degrees with `scaleMap`, else
   the interval of that degree; held notes follow). `harmTrig` 0 steps the chords every
-  `harmBeats` beats, 1..16 on every `harmBeats`-th note-on on that MIDI channel. The ESP sends
-  the next chord's offset ahead and the FPGA applies it on the step's 32nd or trig itself, so
-  the notes of that step already have it (a note that started up to 4 ms before the trig jumps
-  without a glide).
+  `harmBeats` beats, 1 on every `harmBeats`-th note-on on channel 9 (in play mode too, where
+  the notes don't sound themselves). The ESP sends the next chord's offset ahead and the FPGA
+  applies it on the step's 32nd, or before the note that steps it, so the notes of that step
+  already have it (a note that started up to 4 ms before a beat step jumps without a glide).
 
 The firmware's control runs every 64 samples (integer arithmetic) and writes only the registers
 that change; `sim/tb_synth_fw.cpp` runs it against the RTL in Verilator (pitch, filter, ladders,

@@ -21,9 +21,9 @@
  * applies it on the step itself, so the notes of that step already get it.
  *
  * Time: harmTrig 0, the FPGA's 32nd ticks (EV_TICK, while the transport plays), a chord step
- * every harmBeats beats; harmTrig 1..16, a step on each EV_SYN_TRIG (the FPGA counts the note-ons
- * on that channel, every harmBeats-th is one), the ticks only time harmGate (of the last trig
- * interval). Parameters: EV_SYN_PARAM with the harm* ids of include/synth_params.h (and scale, for
+ * every harmBeats beats; harmTrig 1, a step on each EV_SYN_TRIG (the FPGA counts the note-ons on
+ * the synth's channel, every harmBeats-th is one), the ticks only time harmGate (of the last
+ * trig interval). Parameters: EV_SYN_PARAM with the harm* ids of include/synth_params.h (and scale, for
  * its size); the FPGA repeats them every second, so they act only when they change. */
 #ifndef HARMONY_H
 #define HARMONY_H
@@ -44,7 +44,7 @@ struct harm_frame {
 struct harmony {
     /* parameters */
     int mode, beats, phrase, octave, voices, melody_on, vel, seed; /* mode 0 off, 1 play, 2 offset */
-    int trig;                       /* 0 the beat, 1..16 the FPGA's trigs step it */
+    int trig;                       /* 0 the beat, 1 the FPGA's trigs (synth note-ons) step it */
     float gate;
     int scale_n;                    /* degrees per octave of the synth's scale */
     /* state */

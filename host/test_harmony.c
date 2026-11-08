@@ -162,10 +162,10 @@ int main(void) {
         check(notes == 0, "offset mode plays no notes itself");
     }
 
-    /* offset mode on trigs (harmTrig 5): a pending offset is out before every trig */
+    /* offset mode on trigs (harmTrig 1): a pending offset is out before every trig */
     harm_init(&h, 99);
     param(&h, SP_HARMSEED, 7);
-    param(&h, SP_HARMTRIG, 5);
+    param(&h, SP_HARMTRIG, 1);
     param(&h, SP_HARMONY, 2);
     {
         int pend = 0, pend_ofs = 0, missing = 0, applied = 0, distinct = 0, seen[16] = {0}, trigs = 0;
@@ -201,7 +201,7 @@ int main(void) {
         const uint32_t before = h.chords;
         const int midx = h.midx;
         param(&h, SP_HARMONY, 2);
-        param(&h, SP_HARMTRIG, 5);
+        param(&h, SP_HARMTRIG, 1);
         param(&h, SP_HARMSEED, 7);
         printf("offset mode, trigs: %d trigs, %d without an offset ready, %d distinct offsets\n", trigs, missing,
                distinct);
@@ -213,7 +213,7 @@ int main(void) {
 
     /* play mode on trigs with a gate: chords on the trigs, off after half the trig interval */
     harm_init(&h, 5);
-    param(&h, SP_HARMTRIG, 5);
+    param(&h, SP_HARMTRIG, 1);
     param(&h, SP_HARMGATE, 0.5);
     param(&h, SP_HARMONY, 1);
     {

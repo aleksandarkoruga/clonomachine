@@ -37,9 +37,9 @@ enum {
     EV_SYN_PARAM = 15,  /* a = parameter (include/synth_params.h), value = natural units x 2^16 */
     EV_SYN_HOFS  = 16,  /* ESP -> FPGA, harmony offset mode: a = offset in scale degrees + 64 for
                            the synth channel's notes; b = 0 now, 1 at the next chord step: the
-                           32nd tick value (harmTrig 0) or the next step trig (harmTrig 1..16) */
+                           32nd tick value (harmTrig 0) or the next step trig (harmTrig 1) */
     EV_SYN_TRIG  = 17   /* FPGA -> ESP: a chord step trig (every harmBeats-th note-on on the
-                           harmTrig channel); the pending offset has just been applied */
+                           synth's channel, harmTrig 1); the pending offset has just been applied */
 };
 
 struct __attribute__((packed)) smp_event {

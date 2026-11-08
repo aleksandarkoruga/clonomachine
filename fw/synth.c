@@ -418,11 +418,15 @@ void synth_bpm(uint32_t bpm_milli) {
         sy_set_bpm(&g_sy, bpm_milli);
 }
 
+static void harm_note_trig(void);
+
 void synth_midi(const struct mm_synth* pg, uint8_t st, uint8_t d1, uint8_t d2) {
     if (!g_on)
         return;
     switch (st & 0xF0) {
     case 0x90:
+        if (d2)
+            harm_note_trig();
         if (harmony_mode() == 1) /* the harmony generator plays the voices */
             break;
         if (d2) {
@@ -482,11 +486,10 @@ void synth_event(const struct smp_event* e) {
     }
 }
 
-void synth_note_trig(int chan) {
-    if (!g_on || !harmony_mode())
-        return;
-    const int tc = harm_int(SP_HARMTRIG);
-    if (!tc || chan != tc - 1)
+/* a note-on on the synth's channel with harmTrig 1: every harmBeats-th steps the chords, before
+   the note plays (it gets the new offset) */
+static void harm_note_trig(void) {
+    if (!harmony_mode() || !harm_int(SP_HARMTRIG))
         return;
     const uint32_t n = g_hm.trigs++, beats = (uint32_t)harm_int(SP_HARMBEATS);
     if (n % (beats ? beats : 1))
@@ -538,10 +541,10 @@ static void status(void) {
            (int)(sy_natural_q16(&g_sy, SP_ROOT) >> 16), (int)(sy_natural_q16(&g_sy, SP_SCALEMAP) >> 16),
            (int)(sy_natural_q16(&g_sy, SP_NOTEOFFSET) >> 16));
     static const char* const modes[] = {"off", "play", "offset"};
-    const int m = harmony_mode(), tc = harm_int(SP_HARMTRIG);
+    const int m = harmony_mode();
     printf("  harmony %s, steps on ", modes[m < 0 ? 0 : m > 2 ? 2 : m]);
-    if (tc)
-        printf("note-ons on channel %d (%lu so far, every %d)", tc, (unsigned long)g_hm.trigs, harm_int(SP_HARMBEATS));
+    if (harm_int(SP_HARMTRIG))
+        printf("its note-ons (%lu so far, every %d)", (unsigned long)g_hm.trigs, harm_int(SP_HARMBEATS));
     else
         printf("the beat (every %d)", harm_int(SP_HARMBEATS));
     printf(", offset %d degrees%s\n", g_sy.harm_ofs, g_hm.pending ? ", the next one waiting" : "");
@@ -622,7 +625,6 @@ void synth_service(void) {}
 void synth_bpm(uint32_t bpm_milli) { (void)bpm_milli; }
 void synth_midi(const struct mm_synth* pg, uint8_t st, uint8_t d1, uint8_t d2) { (void)pg, (void)st, (void)d1, (void)d2; }
 void synth_event(const struct smp_event* e) { (void)e; }
-void synth_note_trig(int chan) { (void)chan; }
 void synth_harm_tick(uint32_t step) { (void)step; }
 void synth_harm_transport(void) {}
 void synth_console(int argc, char** argv) { (void)argc, (void)argv; puts("synth: not in this gateware"); }

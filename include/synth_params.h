@@ -188,7 +188,7 @@ enum { SK_LIN, SK_EXP, SK_CUBE, SK_INT };
     SY(HARMVEL,     harmVel,     SK_INT,  1,     127,   100,    0)                               \
     SY(HARMMELODY,  harmMelody,  SK_INT,  0,     1,     1,      0)  /* the melody moves the chords */ \
     SY(HARMSEED,    harmSeed,    SK_INT,  0,     127,   0,      0)  /* a new melody from this seed */ \
-    SY(HARMTRIG,    harmTrig,    SK_INT,  0,     16,    0,      0)  /* 0 the beat, 1..16 note-ons on that MIDI channel step it */
+    SY(HARMTRIG,    harmTrig,    SK_INT,  0,     1,     0,      0)  /* 0 the beat, 1 the synth channel's note-ons step it */
 
 #define SY_ENUM(id, name, kind, lo, hi, def, mod) SP_##id,
 enum { SYNTH_PARAMS(SY_ENUM) SP_NUM };

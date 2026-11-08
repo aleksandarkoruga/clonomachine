@@ -432,7 +432,7 @@ void harm_rx(struct harmony* h, const struct smp_event* e) {
             break;
         }
         case SP_HARMTRIG: {
-            const int t = v < 0 ? 0 : v > 16 ? 16 : v;
+            const int t = v != 0;
             if (t != h->trig) {
                 all_off(h);
                 restart(h);
