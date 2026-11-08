@@ -290,14 +290,20 @@ channel 9 (its page in `/midimap.json`), by OSC (`/synth/...`) or the console (`
   when it counts in as many steps, else that many equal steps; the chromatic scales play every
   step of the tuning. `noteOffset` adds to the incoming note (held notes too): an LFO on its CC
   is an arpeggiator, in degrees with `scaleMap`.
-- **Harmony generator** (ESP32, beside the cutter; `harmony` on): functional harmony after the
+- **Harmony generator** (ESP32, beside the cutter; `harmony` 1 or 2): functional harmony after the
   SuperCollider HarmonyGenerator: a chain of degrees 1 3 6 (resolution) -> 2 4 (preparation) ->
   5 7 (tension) that only moves forward (jumps allowed, often staying), a melody grown from a
   seed by inversion / retrograde / transposition / shuffle / rotation that moves the chords,
   triads voiced with the least movement and no parallel fifths or octaves, and a cadence at the
   end of each phrase (authentic, deceptive or half). It sends scale degrees, so the synth's
   scale and tuning apply; `harmBeats`, `harmPhrase`, `harmOctave`, `harmVoices`, `harmGate`,
-  `harmSeed`. MIDI notes on channel 9 wait while it plays.
+  `harmSeed`. `harmony` 1 plays the chords (MIDI notes on channel 9 wait meanwhile); 2 adds the
+  chord's root to the MIDI notes instead, like `noteOffset` (in degrees with `scaleMap`, else
+  the interval of that degree; held notes follow). `harmTrig` 0 steps the chords every
+  `harmBeats` beats, 1..16 on every `harmBeats`-th note-on on that MIDI channel. The ESP sends
+  the next chord's offset ahead and the FPGA applies it on the step's 32nd or trig itself, so
+  the notes of that step already have it (a note that started up to 4 ms before the trig jumps
+  without a glide).
 
 The firmware's control runs every 64 samples (integer arithmetic) and writes only the registers
 that change; `sim/tb_synth_fw.cpp` runs it against the RTL in Verilator (pitch, filter, ladders,

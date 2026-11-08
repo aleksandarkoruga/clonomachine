@@ -62,6 +62,7 @@ struct sy_state {
     const struct sy_table* osc_tab[2];  /* what oscillators A and B play (0: silent) */
     uint32_t fs_q16, bpm_milli, rng;
     int32_t bend;                  /* -8192 .. 8191 */
+    int harm_ofs;                  /* the harmony generator's offset (scale degrees) on MIDI notes */
     sy_write_fn wr;
     /* derived (sy_param_changed) */
     struct sy_envp envp[3];
@@ -92,6 +93,10 @@ void sy_note_on(struct sy_state* s, int note, int vel127, int degree);
 void sy_note_off(struct sy_state* s, int note, int degree);
 void sy_all_off(struct sy_state* s);
 void sy_bend(struct sy_state* s, int v14);
+/* harmony offset mode: added to the MIDI notes (not the degree notes) like noteOffset, in scale
+   degrees (with scaleMap off: the interval of that degree above the root). Held notes follow;
+   notes that started in the last ticks (the same step as the trig) jump without a glide. */
+void sy_set_harm_offset(struct sy_state* s, int degrees);
 void sy_tick(struct sy_state* s);                  /* one control tick */
 int sy_param_of(const char* name);                 /* -1 if unknown (case-insensitive) */
 const char* sy_param_name(int p);

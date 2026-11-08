@@ -283,22 +283,50 @@ static void apply_send(void) {
     const int32_t x = sy_natural_q16(&g_sy, SP_FXSEND); /* 0..1 -> u4.12 */
     eng_write(SMP_ADDR(SMP_GLOBAL_SLOT, SMP_G_SYN_SEND), (uint32_t)(x > 0 ? x >> 4 : 0));
 }
-static int harm_param(int p) { return (p >= SP_HARMONY && p <= SP_HARMSEED) || p == SP_SCALE; }
-static int harmony_on(void) { return sy_natural_q16(&g_sy, SP_HARMONY) != 0; }
+static int harm_param(int p) { return (p >= SP_HARMONY && p <= SP_HARMTRIG) || p == SP_SCALE; }
+static int harm_int(int p) { return (sy_natural_q16(&g_sy, p) + 32768) >> 16; }
+static int harmony_mode(void) { return harm_int(SP_HARMONY); } /* 0 off, 1 play, 2 offset */
+
+/* offset mode: the ESP sends the next chord's offset ahead, applied here on its step (the 32nd
+   tick or the trig) so the notes of that step already get it */
+static struct {
+    int pending, ofs;
+    uint32_t at;     /* the 32nd step (harmTrig 0) */
+    uint32_t trigs;  /* note-ons on the harmTrig channel since the start (every harmBeats-th steps) */
+    int mode;        /* the last mode seen */
+} g_hm;
+
+/* the trig count from the start; the waiting offset goes when the ESP starts over (mode,
+   harmTrig: it sends a new one) or its 32nd means nothing any more (a start on the beat); on
+   trigs the ESP waits with the first chord through stop and start */
+static void harm_reset(int drop) {
+    g_hm.trigs = 0;
+    if (drop)
+        g_hm.pending = 0;
+}
 
 void synth_esp_state(void) {
     if (!g_on)
         return;
     esplink_syn_param(SP_SCALE, sy_natural_q16(&g_sy, SP_SCALE));
-    for (int p = SP_HARMONY; p <= SP_HARMSEED; ++p)
+    for (int p = SP_HARMONY; p <= SP_HARMTRIG; ++p)
         esplink_syn_param(p, sy_natural_q16(&g_sy, p));
 }
 
 static void after_param(int p) {
     if (harm_param(p)) { /* the ESP's harmony generator plays from these */
         esplink_syn_param(p, sy_natural_q16(&g_sy, p));
-        if (p == SP_HARMONY && !harmony_on())
-            sy_all_off(&g_sy);
+        if (p == SP_HARMONY) {
+            const int m = harmony_mode();
+            if (m != g_hm.mode && (m == 0 || g_hm.mode == 1))
+                sy_all_off(&g_sy); /* off, or the generator's notes when it stops playing */
+            if (m != 2)
+                sy_set_harm_offset(&g_sy, 0);
+            if (m != g_hm.mode)
+                harm_reset(1);
+            g_hm.mode = m;
+        } else if (p == SP_HARMTRIG || p == SP_HARMBEATS)
+            harm_reset(p == SP_HARMTRIG);
     }
     if (p == SP_FXSEND)
         apply_send();
@@ -395,7 +423,7 @@ void synth_midi(const struct mm_synth* pg, uint8_t st, uint8_t d1, uint8_t d2) {
         return;
     switch (st & 0xF0) {
     case 0x90:
-        if (harmony_on()) /* the harmony generator plays the voices */
+        if (harmony_mode() == 1) /* the harmony generator plays the voices */
             break;
         if (d2) {
             sy_note_on(&g_sy, d1, d2, 0);
@@ -403,7 +431,7 @@ void synth_midi(const struct mm_synth* pg, uint8_t st, uint8_t d1, uint8_t d2) {
         }
         /* fall through: velocity 0 = note off */
     case 0x80:
-        if (!harmony_on())
+        if (harmony_mode() != 1)
             sy_note_off(&g_sy, d1, 0);
         break;
     case 0xB0:
@@ -443,8 +471,41 @@ void synth_event(const struct smp_event* e) {
     } else if (e->type == EV_SYN_PARAM && e->a < SP_NUM) {
         sy_set_natural(&g_sy, e->a, e->value);
         after_param(e->a);
+    } else if (e->type == EV_SYN_HOFS && harmony_mode() == 2) {
+        if (!e->b)
+            sy_set_harm_offset(&g_sy, (int)e->a - 64);
+        else {
+            g_hm.ofs = (int)e->a - 64;
+            g_hm.at = (uint32_t)e->value;
+            g_hm.pending = 1;
+        }
     }
 }
+
+void synth_note_trig(int chan) {
+    if (!g_on || !harmony_mode())
+        return;
+    const int tc = harm_int(SP_HARMTRIG);
+    if (!tc || chan != tc - 1)
+        return;
+    const uint32_t n = g_hm.trigs++, beats = (uint32_t)harm_int(SP_HARMBEATS);
+    if (n % (beats ? beats : 1))
+        return;
+    if (g_hm.pending) {
+        g_hm.pending = 0;
+        sy_set_harm_offset(&g_sy, g_hm.ofs);
+    }
+    esplink_syn_trig();
+}
+
+void synth_harm_tick(uint32_t step) {
+    if (g_on && g_hm.pending && !harm_int(SP_HARMTRIG) && (int32_t)(step - g_hm.at) >= 0) {
+        g_hm.pending = 0;
+        sy_set_harm_offset(&g_sy, g_hm.ofs);
+    }
+}
+
+void synth_harm_transport(void) { harm_reset(!harm_int(SP_HARMTRIG)); }
 
 /* ---- console ------------------------------------------------------------------------------- */
 static int32_t parse_q16(const char* s) {
@@ -476,6 +537,14 @@ static void status(void) {
            scale_name(sy_natural_q16(&g_sy, SP_SCALE) >> 16), tuning_name(sy_natural_q16(&g_sy, SP_TUNING) >> 16),
            (int)(sy_natural_q16(&g_sy, SP_ROOT) >> 16), (int)(sy_natural_q16(&g_sy, SP_SCALEMAP) >> 16),
            (int)(sy_natural_q16(&g_sy, SP_NOTEOFFSET) >> 16));
+    static const char* const modes[] = {"off", "play", "offset"};
+    const int m = harmony_mode(), tc = harm_int(SP_HARMTRIG);
+    printf("  harmony %s, steps on ", modes[m < 0 ? 0 : m > 2 ? 2 : m]);
+    if (tc)
+        printf("note-ons on channel %d (%lu so far, every %d)", tc, (unsigned long)g_hm.trigs, harm_int(SP_HARMBEATS));
+    else
+        printf("the beat (every %d)", harm_int(SP_HARMBEATS));
+    printf(", offset %d degrees%s\n", g_sy.harm_ofs, g_hm.pending ? ", the next one waiting" : "");
 }
 
 void synth_console(int argc, char** argv) {
@@ -553,6 +622,9 @@ void synth_service(void) {}
 void synth_bpm(uint32_t bpm_milli) { (void)bpm_milli; }
 void synth_midi(const struct mm_synth* pg, uint8_t st, uint8_t d1, uint8_t d2) { (void)pg, (void)st, (void)d1, (void)d2; }
 void synth_event(const struct smp_event* e) { (void)e; }
+void synth_note_trig(int chan) { (void)chan; }
+void synth_harm_tick(uint32_t step) { (void)step; }
+void synth_harm_transport(void) {}
 void synth_console(int argc, char** argv) { (void)argc, (void)argv; puts("synth: not in this gateware"); }
 void synth_esp_state(void) {}
 

@@ -113,6 +113,8 @@ static void tick(uint32_t step, int source) {
     g.step = step;
     g.have_step = 1;
     ++g.ticks;
+    if (g.playing)
+        synth_harm_tick(step); /* a harmony offset due on this 32nd: before the notes of the step */
     send1(EV_TICK, (uint8_t)source, (uint8_t)g.playing, 0, (int32_t)step);
 }
 
@@ -216,6 +218,7 @@ void esplink_midi_tick(uint32_t x) {
 void esplink_transport(int start) {
     g.stopped = !start;
     g.playing = start;
+    synth_harm_transport();
     send1(start ? EV_START : EV_STOP, 0, 0, 0, 0);
 }
 
@@ -229,6 +232,7 @@ void esplink_owner(int slot, int cutter) {
 }
 
 void esplink_syn_param(int p, int32_t v) { send1(EV_SYN_PARAM, 0, (uint8_t)p, 0, v); }
+void esplink_syn_trig(void) { send1(EV_SYN_TRIG, 0, 0, 0, 0); }
 
 void esplink_forward_midi(uint8_t st, uint8_t d1, uint8_t d2) {
     const uint8_t chan = st & 0xF;
@@ -265,6 +269,7 @@ void esplink_owner(int slot, int cutter) { (void)slot; (void)cutter; }
 void esplink_base_buf(int buf) { (void)buf; }
 void esplink_forward_midi(uint8_t st, uint8_t d1, uint8_t d2) { (void)st; (void)d1; (void)d2; }
 void esplink_syn_param(int p, int32_t v) { (void)p; (void)v; }
+void esplink_syn_trig(void) {}
 void esplink_status(void) { printf("esp: no ESP UART in this gateware\n"); }
 int esplink_sim(void) { return 0; }
 void esplink_sim_event(const struct smp_event* e) { mapping_event(e); }

@@ -140,6 +140,7 @@ static int next_function(struct harmony* h) {
 static void voice_chord(struct harmony* h, int func) {
     const int n = h->voices, maxd = 4 * h->scale_n, sn = h->scale_n;
     const int base = (func - 1) + (h->melody_on && h->mlen ? h->melody[h->midx] : 0);
+    h->root = base;
     int nc[HARM_VOICES];
     for (int i = 0; i < n; ++i)
         nc[i] = (2 * i + base) % maxd;
@@ -238,15 +239,53 @@ static void play_chord(struct harmony* h) {
     }
 }
 
+/* offset mode: the root within half an octave around the key's root, + harmOctave */
+int harm_offset(const struct harmony* h) {
+    const int sn = h->scale_n > 0 ? h->scale_n : 7;
+    int r = h->root % sn;
+    if (r < 0)
+        r += sn;
+    if (r > sn / 2)
+        r -= sn;
+    return r + h->octave * sn;
+}
+/* when: 0 now, 1 on the next step (at = its 32nd with harmTrig 0) */
+static void put_offset(struct harmony* h, int when, uint32_t at) {
+    struct harm_frame* f = frame(h);
+    if (!f)
+        return;
+    struct smp_event* e = &f->ev[f->n++];
+    const int o = 64 + harm_offset(h);
+    e->type = EV_SYN_HOFS;
+    e->chan = 0;
+    e->a = (uint8_t)(o < 0 ? 0 : o > 127 ? 127 : o);
+    e->b = (uint8_t)when;
+    e->value = (int32_t)at;
+}
+
 static uint32_t step_len(const struct harmony* h) { return (uint32_t)(h->beats > 0 ? h->beats : 1) * 8; }
+#define NEVER 0xFFFFFFFFu
 
 static void restart(struct harmony* h) {
     h->fresh = 1;
     h->pos = 0;
     h->func = 1;
+    h->midx = 0; /* the melody from its start too */
     h->have_step = 0;
+    h->ahead = 0;
+    h->have_trig = 0;
+    h->off_at = NEVER;
     for (int i = 0; i < HARM_VOICES; ++i)
         h->chord[i] = 2 * i;
+}
+
+/* offset mode on trigs: the first chord waits for the first trig */
+static void prime(struct harmony* h) {
+    if (h->mode == 2 && h->trig && !h->ahead) {
+        harm_step(h);
+        put_offset(h, 1, 0);
+        h->ahead = 1;
+    }
 }
 
 void harm_init(struct harmony* h, uint32_t seed) {
@@ -265,24 +304,88 @@ void harm_init(struct harmony* h, uint32_t seed) {
     restart(h);
 }
 
+/* offset mode on the beat: the first chord now, then each one a step ahead with its 32nd */
+static void offset_tick(struct harmony* h, uint32_t step, uint32_t L) {
+    if (!h->ahead) {
+        harm_step(h);
+        put_offset(h, 0, 0);
+        h->next_at = (step / L + 1) * L;
+        harm_step(h);
+        put_offset(h, 1, h->next_at);
+        h->ahead = 1;
+        return;
+    }
+    if ((int32_t)(step - h->next_at) >= 0) { /* the FPGA has applied it on this 32nd */
+        h->next_at += L;
+        if ((int32_t)(step - h->next_at) >= 0)
+            h->next_at = (step / L + 1) * L;
+        harm_step(h);
+        put_offset(h, 1, h->next_at);
+    }
+}
+
+/* a step trig from the FPGA (harmTrig): it has applied the pending offset already */
+static void trig(struct harmony* h) {
+    if (!h->mode || !h->trig)
+        return;
+    if (h->have_trig) {
+        const uint32_t d = h->step - h->last_trig;
+        if (d > 0 && d < 32 * 64)
+            h->trig_len = d;
+    }
+    h->have_trig = 1;
+    h->last_trig = h->step;
+    if (h->mode == 2) {
+        if (!h->ahead) { /* nothing was out: this one now, the next ahead */
+            harm_step(h);
+            put_offset(h, 0, 0);
+        }
+        h->ahead = 0;
+        prime(h);
+        return;
+    }
+    harm_step(h);
+    if (h->gate < 0.999f)
+        all_off(h);
+    play_chord(h);
+    h->off_at = NEVER;
+    if (h->gate < 0.999f) {
+        const uint32_t L = h->trig_len ? h->trig_len : step_len(h);
+        const uint32_t g = (uint32_t)(h->gate * (float)L);
+        h->off_at = h->step + (g < 1 ? 1 : g);
+    }
+}
+
 static void tick(struct harmony* h, uint32_t step, int playing) {
     h->step = step;
-    if (!h->on || !playing) {
-        if (h->playing || !h->on)
+    if (h->trig) { /* the trigs step it: the ticks only time the gate */
+        if (h->off_at != NEVER && (int32_t)(step - h->off_at) >= 0) {
+            all_off(h);
+            h->off_at = NEVER;
+        }
+        return;
+    }
+    if (!h->mode || !playing) {
+        if (h->playing || !h->mode)
             all_off(h);
         h->playing = playing;
+        h->ahead = 0;
         return;
     }
     h->playing = 1;
     const uint32_t L = step_len(h);
+    if (h->mode == 2) {
+        offset_tick(h, step, L);
+        return;
+    }
     if (!h->have_step) { /* the first chord on the next step boundary (now if on one) */
         h->have_step = 1;
         h->next_at = (step + L - 1) / L * L;
-        h->off_at = 0xFFFFFFFFu;
+        h->off_at = NEVER;
     }
-    if (h->off_at != 0xFFFFFFFFu && (int32_t)(step - h->off_at) >= 0) {
+    if (h->off_at != NEVER && (int32_t)(step - h->off_at) >= 0) {
         all_off(h);
-        h->off_at = 0xFFFFFFFFu;
+        h->off_at = NEVER;
     }
     if ((int32_t)(step - h->next_at) >= 0) {
         harm_step(h);
@@ -304,22 +407,40 @@ static int nat_int(int32_t v) { return (v + (v >= 0 ? 32768 : -32768)) >> 16; }
 void harm_rx(struct harmony* h, const struct smp_event* e) {
     switch (e->type) {
     case EV_TICK: tick(h, (uint32_t)e->value, e->a & 1); break;
-    case EV_START: restart(h); break;
+    case EV_SYN_TRIG: trig(h); break;
+    case EV_START:
+        restart(h);
+        prime(h);
+        break;
     case EV_STOP:
         all_off(h);
         h->playing = 0;
         restart(h);
+        prime(h);
         break;
     case EV_SYN_PARAM: {
         const int v = nat_int(e->value);
         switch (e->a) {
-        case SP_HARMONY:
-            if (!v)
-                all_off(h);
-            else if (!h->on)
+        case SP_HARMONY: {
+            const int m = v < 0 ? 0 : v > 2 ? 2 : v;
+            if (m != h->mode) {
+                all_off(h); /* the notes it played */
                 restart(h);
-            h->on = v != 0;
+                h->mode = m;
+                prime(h);
+            }
             break;
+        }
+        case SP_HARMTRIG: {
+            const int t = v < 0 ? 0 : v > 16 ? 16 : v;
+            if (t != h->trig) {
+                all_off(h);
+                restart(h);
+                h->trig = t;
+                prime(h);
+            }
+            break;
+        }
         case SP_HARMBEATS: h->beats = v < 1 ? 1 : v; break;
         case SP_HARMPHRASE:
             h->phrase = v < 1 ? 1 : v;
@@ -333,8 +454,10 @@ void harm_rx(struct harmony* h, const struct smp_event* e) {
         case SP_HARMVEL: h->vel = v < 1 ? 1 : v > 127 ? 127 : v; break;
         case SP_HARMMELODY: h->melody_on = v != 0; break;
         case SP_HARMSEED:
-            h->seed = v;
-            harm_new_melody(h, 0x9E3779B9u * (uint32_t)(v + 1));
+            if (v != h->seed) {
+                h->seed = v;
+                harm_new_melody(h, 0x9E3779B9u * (uint32_t)(v + 1));
+            }
             break;
         case SP_SCALE: {
             const int n = scale_size(v);

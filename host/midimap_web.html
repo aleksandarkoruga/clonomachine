@@ -222,11 +222,14 @@ const SYN_DESC = {
   filtOn: "Off: everything bypasses the filter.", filtKey: "Cutoff follows the note: 1 = an octave per octave.",
   subOn: "The sub oscillator (sine or triangle, octaves below).", subShape: "0 sine, 1 triangle.",
   noiseOn: "White noise.",
-  harmony: "On: the ESP32 harmony generator plays the voices (chords in scale degrees with cadences); MIDI notes are ignored then.",
-  harmBeats: "Beats per chord step (the functions often stay, so chords change less often).",
+  harmony: "The ESP32 harmony generator (chords in scale degrees with cadences). 0 off; 1 play: it plays the voices, MIDI notes are ignored; " +
+    "2 offset: the chord's root is added to the MIDI notes like noteOffset (degrees with scaleMap, else that degree's interval), held notes follow.",
+  harmBeats: "Beats per chord step (the functions often stay, so chords change less often); with harmTrig: trigs per step.",
+  harmTrig: "What steps the chords: 0 the beat (while the transport plays); 1 .. 16 note-ons on that MIDI channel (every harmBeats-th one), " +
+    "exact to the trig: the notes of that step already get the new chord.",
   harmPhrase: "Chord steps per phrase; the last ones make its cadence.",
   harmOctave: "Register of the chords, octaves.", harmVoices: "Notes per chord (1 .. 3 voices).",
-  harmGate: "Note length as a fraction of the step; 1 = held (only changed voices move).",
+  harmGate: "Note length as a fraction of the step (with harmTrig: of the last trig interval); 1 = held (only changed voices move).",
   harmVel: "Velocity of the chords.", harmMelody: "On: the generated melody moves the chord roots (as in the SuperCollider version).",
   harmSeed: "A new melody from this seed (the same seed, the same melody).",
 };
@@ -436,7 +439,7 @@ function render() {
     c.append(g);
     knobTable(c, sy, S.filter(n => n !== "bend"), I);
     const n = document.createElement("div"); n.className = "note";
-    n.textContent = "Notes on this channel play the synth (velocity: its level) unless the harmony generator is on. " +
+    n.textContent = "Notes on this channel play the synth (velocity: its level) unless the harmony generator plays (harmony 1). " +
       "The same parameters by OSC: /synth/<name> <value> in their units (host/osc_bridge.py).";
     c.append(n);
     cards.append(c);

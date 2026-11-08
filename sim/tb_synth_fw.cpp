@@ -346,6 +346,48 @@ int main(int argc, char** argv) {
         check(std::fabs(f0 - 261.63) < 0.5 && std::fabs(f1 - 392.0) < 0.5, "noteOffset steps the held note in degrees");
     });
 
+    run("harm_offset", [&] {  // harmony offset mode: the chord's root on the MIDI notes
+        set(s, "aTable", 4);
+        set(s, "scaleMap", 1);
+        sy_note_on(&s, 60, 100, 0);
+        samples(s, 6000);
+        sy_set_harm_offset(&s, 4);  // degree 4: G4, the held note follows
+        samples(s, 6000);
+        const double f1 = f0_zc(out, out.size() - 4096, 4096);
+        sy_note_off(&s, 60, 0);
+        samples(s, 2400);
+        set(s, "scaleMap", 0);
+        set(s, "scale", 1);  // minor: degree 2 = 3 semitones above the root
+        sy_set_harm_offset(&s, 2);
+        sy_note_on(&s, 57, 100, 0);  // A3 chromatic, + a minor third = C4
+        samples(s, 6000);
+        const double f2 = f0_zc(out, out.size() - 4096, 4096);
+        sy_note_off(&s, 57, 0);
+        samples(s, 2400);
+        sy_set_harm_offset(&s, 0);
+        set(s, "porta", 0.5);  // a long glide: a note that came with the trig jumps anyway
+        set(s, "portaAlways", 1);
+        sy_note_on(&s, 57, 100, 0);
+        samples(s, 64);           // one tick into the note: the trig's offset arrives
+        sy_set_harm_offset(&s, 2);
+        samples(s, 2400);
+        const double f3 = f0_zc(out, out.size() - 2048, 2048);
+        sy_set_harm_offset(&s, -2); // held a while: glides (an old note), A3 - 4 semitones = F3
+        samples(s, 960);
+        const double f4 = f0_zc(out, out.size() - 960, 960);
+        std::printf("  C4 + 4 degrees %.2f Hz (392.00), A3 + minor degree 2 %.2f Hz (261.63), "
+                    "young note jumps %.2f Hz (261.63), old note glides %.2f Hz (between 174.6 and 261.6)\n",
+                    f1, f2, f3, f4);
+        check(std::fabs(f1 - 392.0) < 0.5, "offset 4 degrees moves the held note (scaleMap)");
+        check(std::fabs(f2 - 261.63) < 0.5, "without scaleMap: the degree's interval");
+        check(std::fabs(f3 - 261.63) < 0.8, "a note started with the trig takes the offset at once");
+        check(f4 > 180 && f4 < 255, "a held note glides to the new chord");
+        sy_note_off(&s, 57, 0);
+        set(s, "porta", 0);
+        set(s, "portaAlways", 0);
+        sy_set_harm_offset(&s, 0);
+    });
+
     run("glide_legato", [&] {  // mono legato: the second note glides, no new attack
         set(s, "aTable", 4);
         set(s, "mono", 1);

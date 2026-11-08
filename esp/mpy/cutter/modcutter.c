@@ -329,7 +329,9 @@ static mp_obj_t cutter_status(void) {
             mp_obj_dict_store(moves, mp_obj_new_str(cut_move_name(m), strlen(cut_move_name(m))),
                               mp_obj_new_int(g_c.stats_hits[m]));
     PUT("moves", moves);
-    PUT("harmony", mp_obj_new_bool(g_h.on));
+    PUT("harmony", mp_obj_new_int(g_h.mode));
+    PUT("harm_trig", mp_obj_new_int(g_h.trig));
+    PUT("harm_offset", mp_obj_new_int(g_h.mode == 2 ? harm_offset(&g_h) : 0));
     PUT("chords", mp_obj_new_int(g_h.chords));
     PUT("cadences", mp_obj_new_int(g_h.cadences));
 #undef PUT

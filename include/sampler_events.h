@@ -34,7 +34,12 @@ enum {
     /* the wavetable synth (fw/synth.c; its MIDI notes / CCs: the synth channel's events)     */
     EV_SYN_NOTE  = 14,  /* a = scale degree + 64 (64: the root at MIDI 60), b = velocity, 0 off
                            (the harmony generator: degrees go through the synth's scale)     */
-    EV_SYN_PARAM = 15   /* a = parameter (include/synth_params.h), value = natural units x 2^16 */
+    EV_SYN_PARAM = 15,  /* a = parameter (include/synth_params.h), value = natural units x 2^16 */
+    EV_SYN_HOFS  = 16,  /* ESP -> FPGA, harmony offset mode: a = offset in scale degrees + 64 for
+                           the synth channel's notes; b = 0 now, 1 at the next chord step: the
+                           32nd tick value (harmTrig 0) or the next step trig (harmTrig 1..16) */
+    EV_SYN_TRIG  = 17   /* FPGA -> ESP: a chord step trig (every harmBeats-th note-on on the
+                           harmTrig channel); the pending offset has just been applied */
 };
 
 struct __attribute__((packed)) smp_event {

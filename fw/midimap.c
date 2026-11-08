@@ -56,7 +56,7 @@ static void synth_defaults(struct mm_synth* y) {
         SP_MORPHY,   SP_SLOT1,    SP_SLOT1TYPE, SP_FILTKEY,    SP_LFO1RATE, SP_MOD2AMT,  SP_LFO2RATE, SP_MOD3AMT,
         SP_PORTA,    SP_MONO,     SP_LEGATO,    SP_SCALE,      SP_SCALEMAP, SP_ROOT,     SP_VOLUME,   SP_ARPRETRIG,
         SP_TUNING,   SP_HARMONY,  SP_HARMBEATS, SP_HARMPHRASE, SP_HARMOCTAVE, SP_HARMVOICES, SP_HARMGATE, SP_HARMMELODY,
-        SP_HARMSEED};
+        SP_HARMSEED, SP_HARMTRIG};
     memset(y, 0, sizeof(*y));
     y->chan = 8; /* channel 9 */
     y->cc = 16;

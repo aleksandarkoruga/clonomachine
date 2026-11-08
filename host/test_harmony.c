@@ -110,6 +110,138 @@ int main(void) {
            maxs, nows);
     check(ons > 20 && maxs <= 3, "chords play, never more than three notes");
     check(nows == 0, "turning it off silences every note");
+
+    /* offset mode on the beat: the next chord's offset goes out a step ahead with its 32nd; the
+       FPGA (simulated) applies it on that tick */
+    harm_init(&h, 4242);
+    param(&h, SP_HARMSEED, 3);
+    param(&h, SP_HARMONY, 2);
+    harm_rx(&h, &st);
+    {
+        int applied = 0, pend = 0, pend_ofs = 0, now_n = 0, late = 0, notes = 0, out_of_range = 0, distinct = 0;
+        uint32_t pend_at = 0, last_at = 0;
+        int bad_grid = 0, seen[16] = {0};
+        for (uint32_t s = 0; s < 32 * 32; ++s) {
+            if (pend && (int32_t)(s - pend_at) >= 0) { /* the FPGA's tick: before the ESP sees it */
+                if (s != pend_at)
+                    ++late;
+                applied = pend_ofs, pend = 0;
+            }
+            struct smp_event t = {EV_TICK, 0, 1, 0, (int32_t)s};
+            harm_rx(&h, &t);
+            struct harm_frame f;
+            while (harm_pop(&h, &f))
+                for (int k = 0; k < f.n; ++k) {
+                    const struct smp_event* e = &f.ev[k];
+                    if (e->type == EV_SYN_NOTE) {
+                        ++notes;
+                        continue;
+                    }
+                    if (e->type != EV_SYN_HOFS)
+                        continue;
+                    const int o = (int)e->a - 64;
+                    if (o < -3 || o > 3)
+                        ++out_of_range;
+                    if (!e->b)
+                        applied = o, ++now_n;
+                    else {
+                        if ((uint32_t)e->value % 32 || (last_at && (uint32_t)e->value != last_at + 32) ||
+                            (int32_t)((uint32_t)e->value - s) <= 0)
+                            ++bad_grid;
+                        last_at = pend_at = (uint32_t)e->value, pend_ofs = o, pend = 1;
+                    }
+                }
+            if (!seen[applied + 8]++)
+                ++distinct;
+        }
+        printf("offset mode, beat: %lu chords, %d sent now, %d applied late, %d off the grid, %d out of range, "
+               "%d distinct offsets, %d notes\n", (unsigned long)h.chords, now_n, late, bad_grid, out_of_range,
+               distinct, notes);
+        check(now_n == 1 && late == 0 && bad_grid == 0, "the first chord now, then each one ahead on its bar");
+        check(out_of_range == 0 && distinct >= 3, "offsets within half an octave, the chords move");
+        check(notes == 0, "offset mode plays no notes itself");
+    }
+
+    /* offset mode on trigs (harmTrig 5): a pending offset is out before every trig */
+    harm_init(&h, 99);
+    param(&h, SP_HARMSEED, 7);
+    param(&h, SP_HARMTRIG, 5);
+    param(&h, SP_HARMONY, 2);
+    {
+        int pend = 0, pend_ofs = 0, missing = 0, applied = 0, distinct = 0, seen[16] = {0}, trigs = 0;
+        struct harm_frame f;
+        while (harm_pop(&h, &f)) /* what turning it on sent: the first chord, waiting for a trig */
+            for (int k = 0; k < f.n; ++k)
+                if (f.ev[k].type == EV_SYN_HOFS && f.ev[k].b)
+                    pend_ofs = (int)f.ev[k].a - 64, pend = 1;
+        for (uint32_t s = 0; s < 32 * 16; ++s) {
+            if (s % 8 == 0) { /* a kick every beat: the FPGA applies, then tells the ESP */
+                ++trigs;
+                if (pend)
+                    applied = pend_ofs, pend = 0;
+                else
+                    ++missing;
+                struct smp_event tr = {EV_SYN_TRIG, 0, 0, 0, 0};
+                harm_rx(&h, &tr);
+            }
+            struct smp_event t = {EV_TICK, 0, 1, 0, (int32_t)s};
+            harm_rx(&h, &t);
+            while (harm_pop(&h, &f))
+                for (int k = 0; k < f.n; ++k)
+                    if (f.ev[k].type == EV_SYN_HOFS) {
+                        if (f.ev[k].b)
+                            pend_ofs = (int)f.ev[k].a - 64, pend = 1;
+                        else
+                            applied = (int)f.ev[k].a - 64;
+                    }
+            if (s % 8 == 0 && !seen[applied + 8]++)
+                ++distinct;
+        }
+        /* the parameters again (the FPGA repeats them every second): nothing restarts */
+        const uint32_t before = h.chords;
+        const int midx = h.midx;
+        param(&h, SP_HARMONY, 2);
+        param(&h, SP_HARMTRIG, 5);
+        param(&h, SP_HARMSEED, 7);
+        printf("offset mode, trigs: %d trigs, %d without an offset ready, %d distinct offsets\n", trigs, missing,
+               distinct);
+        check(missing == 0 && distinct >= 3, "every trig finds the next chord's offset waiting");
+        check(h.chords == before && h.midx == midx, "repeated parameters change nothing (the melody runs on)");
+        while (harm_pop(&h, &f))
+            ;
+    }
+
+    /* play mode on trigs with a gate: chords on the trigs, off after half the trig interval */
+    harm_init(&h, 5);
+    param(&h, SP_HARMTRIG, 5);
+    param(&h, SP_HARMGATE, 0.5);
+    param(&h, SP_HARMONY, 1);
+    {
+        int on_at_trig = 0, on_elsewhere = 0, off_mid = 0, trigs = 0;
+        struct harm_frame f;
+        for (uint32_t s = 0; s < 32 * 16; ++s) {
+            struct smp_event t = {EV_TICK, 0, 0, 0, (int32_t)s}; /* stopped: trigs work anyway */
+            harm_rx(&h, &t);
+            if (s % 16 == 0) {
+                ++trigs;
+                struct smp_event tr = {EV_SYN_TRIG, 0, 0, 0, 0};
+                harm_rx(&h, &tr);
+            }
+            while (harm_pop(&h, &f))
+                for (int k = 0; k < f.n; ++k) {
+                    if (f.ev[k].type != EV_SYN_NOTE)
+                        continue;
+                    if (f.ev[k].b)
+                        (s % 16 == 0 ? ++on_at_trig : ++on_elsewhere);
+                    else if (s % 16 == 8)
+                        ++off_mid;
+                }
+        }
+        printf("play mode, trigs: %d trigs, %d note ons on them, %d elsewhere, %d offs half way\n", trigs,
+               on_at_trig, on_elsewhere, off_mid);
+        check(on_at_trig >= 3 * (trigs - 1) && on_elsewhere == 0, "the chords strike on the trigs");
+        check(off_mid >= 3 * (trigs - 2), "harmGate 0.5: off half way to the next trig");
+    }
     printf(fails ? "%d FAILED\n" : "ALL PASS\n", fails);
     return fails ? 1 : 0;
 }

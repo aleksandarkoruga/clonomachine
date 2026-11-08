@@ -175,14 +175,18 @@ static void porta_derive(struct sy_state* s) {
     s->porta_k = t > 0.0005 ? (int32_t)(d_exp(-4.6 * dt / t) * 1073741824.0) : 0;
 }
 
-/* the pitch a voice's note stands for (semitones Q16): MIDI as is, or through the scale */
+/* the pitch a voice's note stands for (semitones Q16): MIDI as is, or through the scale; the
+   harmony offset on MIDI notes in degrees (without scaleMap: that degree's interval) */
 static int32_t note_pitch(const struct sy_state* s, const struct sy_voice* v) {
     const int off = ival(s, SP_NOTEOFFSET);
+    const int sc = ival(s, SP_SCALE), tu = ival(s, SP_TUNING), root = ival(s, SP_ROOT);
     if (v->degree)
-        return scale_pitch_q16(ival(s, SP_SCALE), ival(s, SP_TUNING), ival(s, SP_ROOT), v->note - 64 + off);
+        return scale_pitch_q16(sc, tu, root, v->note - 64 + off);
     const int n = v->note + off;
     if (ival(s, SP_SCALEMAP))
-        return scale_pitch_q16(ival(s, SP_SCALE), ival(s, SP_TUNING), ival(s, SP_ROOT), n - 60);
+        return scale_pitch_q16(sc, tu, root, n - 60 + s->harm_ofs);
+    if (s->harm_ofs)
+        return (n << 16) + scale_pitch_q16(sc, tu, root, s->harm_ofs) - scale_pitch_q16(sc, tu, root, 0);
     return n << 16;
 }
 
@@ -432,6 +436,26 @@ void sy_note_off(struct sy_state* s, int note, int degree) {
         }
     }
 }
+#define HARM_SNAP_TICKS 3 /* ~4 ms: a note this young came with the trig, it takes the new chord */
+void sy_set_harm_offset(struct sy_state* s, int degrees) {
+    if (degrees == s->harm_ofs)
+        return;
+    s->harm_ofs = degrees;
+    const int retrig = ival(s, SP_ARPRETRIG);
+    for (int i = 0; i < SY_VOICES; ++i) {
+        struct sy_voice* v = &s->v[i];
+        if (!v->active || !v->gate || v->degree)
+            continue;
+        v->target = note_pitch(s, v);
+        const int young = v->age <= HARM_SNAP_TICKS;
+        if (young || !s->porta_k)
+            v->pitch = v->target;
+        if (retrig && !young)
+            for (int e = 0; e < 3; ++e)
+                env_on(&v->env[e]);
+    }
+}
+
 void sy_all_off(struct sy_state* s) {
     for (int i = 0; i < SY_VOICES; ++i) {
         s->v[i].gate = 0;

@@ -14,10 +14,17 @@
  *   cadences    the last steps of a phrase lead to a cadence: authentic (5 or 7 -> 1), deceptive
  *               (5 -> 6) or half (ending on 5); never preparation straight to the tonic
  *
- * Time: the FPGA's 32nd ticks (EV_TICK, while the transport plays); a chord step every
- * harmBeats beats. Out: EV_SYN_NOTE (scale degrees: the synth maps them through its scale and
- * tuning) for the voices whose note changes. Parameters: EV_SYN_PARAM with the harm* ids of
- * include/synth_params.h (and scale, for its size). */
+ * Modes (harmony): 1 play, EV_SYN_NOTE (scale degrees: the synth maps them through its scale
+ * and tuning) for the voices whose note changes; 2 offset, the chord's root (in degrees, within
+ * half an octave of the key's root, + harmOctave) goes to the synth as EV_SYN_HOFS and is added
+ * to its MIDI notes like noteOffset. The next chord's offset is sent a step ahead and the FPGA
+ * applies it on the step itself, so the notes of that step already get it.
+ *
+ * Time: harmTrig 0, the FPGA's 32nd ticks (EV_TICK, while the transport plays), a chord step
+ * every harmBeats beats; harmTrig 1..16, a step on each EV_SYN_TRIG (the FPGA counts the note-ons
+ * on that channel, every harmBeats-th is one), the ticks only time harmGate (of the last trig
+ * interval). Parameters: EV_SYN_PARAM with the harm* ids of include/synth_params.h (and scale, for
+ * its size); the FPGA repeats them every second, so they act only when they change. */
 #ifndef HARMONY_H
 #define HARMONY_H
 
@@ -36,7 +43,8 @@ struct harm_frame {
 
 struct harmony {
     /* parameters */
-    int on, beats, phrase, octave, voices, melody_on, vel, seed;
+    int mode, beats, phrase, octave, voices, melody_on, vel, seed; /* mode 0 off, 1 play, 2 offset */
+    int trig;                       /* 0 the beat, 1..16 the FPGA's trigs step it */
     float gate;
     int scale_n;                    /* degrees per octave of the synth's scale */
     /* state */
@@ -47,6 +55,10 @@ struct harmony {
     int func;                       /* the current function degree 1..7 */
     int pos;                        /* chord step within the phrase */
     int chord[HARM_VOICES];         /* degrees (0 .. 4 octaves) per voice */
+    int root;                       /* the chord's root degree (function + melody) */
+    int ahead;                      /* offset mode: the next chord's offset is out */
+    uint32_t last_trig, trig_len;   /* trig mode: the last trig's step, the interval (32nds) */
+    int have_trig;
     int sounding[HARM_VOICES];      /* the note each voice plays (-1 none) */
     int16_t melody[HARM_MAX_MELODY];
     int mlen, midx;
@@ -60,6 +72,7 @@ struct harmony {
 void harm_init(struct harmony* h, uint32_t seed);
 void harm_rx(struct harmony* h, const struct smp_event* e);  /* ticks, transport, parameters */
 int harm_pop(struct harmony* h, struct harm_frame* f);        /* 1 while frames are waiting */
+int harm_offset(const struct harmony* h);                     /* offset mode: the chord's offset */
 void harm_new_melody(struct harmony* h, uint32_t seed);
 /* one chord step by hand (tests): the next function and chord */
 void harm_step(struct harmony* h);

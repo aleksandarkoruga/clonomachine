@@ -176,17 +176,19 @@ enum { SK_LIN, SK_EXP, SK_CUBE, SK_INT };
     SY(MOD8SRC,     mod8Src,     SK_INT,  0,     16,    0,      0)                               \
     SY(MOD8DST,     mod8Dst,     SK_INT,  0,     23,    0,      0)                               \
     SY(MOD8AMT,     mod8Amt,     SK_LIN,  -1,    1,     0,      0)                               \
-    /* the harmony generator on the ESP32 (esp/harmony): it plays the voices while on (MIDI notes \
-       on the synth channel are ignored then); chords in scale degrees, through scale / tuning */ \
-    SY(HARMONY,     harmony,     SK_INT,  0,     1,     0,      0)                               \
-    SY(HARMBEATS,   harmBeats,   SK_INT,  1,     16,    4,      0)  /* beats per chord step */   \
+    /* the harmony generator on the ESP32 (esp/harmony): 1 play, it plays the voices (MIDI notes \
+       on the synth channel are ignored then); 2 offset, the chord's root is added to the MIDI   \
+       notes (in scale degrees, like noteOffset); chords in scale degrees, through scale / tuning */ \
+    SY(HARMONY,     harmony,     SK_INT,  0,     2,     0,      0)  /* 0 off, 1 play, 2 offset */ \
+    SY(HARMBEATS,   harmBeats,   SK_INT,  1,     16,    4,      0)  /* beats (harmTrig: trigs) per chord step */ \
     SY(HARMPHRASE,  harmPhrase,  SK_INT,  1,     32,    8,      0)  /* steps per phrase (its cadence at the end) */ \
     SY(HARMOCTAVE,  harmOctave,  SK_INT,  -2,    2,     0,      0)                               \
     SY(HARMVOICES,  harmVoices,  SK_INT,  1,     3,     3,      0)                               \
     SY(HARMGATE,    harmGate,    SK_LIN,  0.05,  1,     1,      0)  /* of the step; 1 = legato */ \
     SY(HARMVEL,     harmVel,     SK_INT,  1,     127,   100,    0)                               \
     SY(HARMMELODY,  harmMelody,  SK_INT,  0,     1,     1,      0)  /* the melody moves the chords */ \
-    SY(HARMSEED,    harmSeed,    SK_INT,  0,     127,   0,      0)  /* a new melody from this seed */
+    SY(HARMSEED,    harmSeed,    SK_INT,  0,     127,   0,      0)  /* a new melody from this seed */ \
+    SY(HARMTRIG,    harmTrig,    SK_INT,  0,     16,    0,      0)  /* 0 the beat, 1..16 note-ons on that MIDI channel step it */
 
 #define SY_ENUM(id, name, kind, lo, hi, def, mod) SP_##id,
 enum { SYNTH_PARAMS(SY_ENUM) SP_NUM };
