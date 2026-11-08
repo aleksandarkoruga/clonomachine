@@ -176,8 +176,8 @@ int main(int argc, char** argv) {
     FILE* index = std::fopen((out / "index.txt").c_str(), "w");  // the numbers to look up (the board ignores it)
     for (auto& j : jobs) {
         const uint32_t w = uint32_t(j.t.frames) * kFrameWords;
-        char fn[96];
-        std::snprintf(fn, sizeof fn, "%02d_%s.wtl", idx, j.name.c_str());
+        char fn[96];  // three digits (the board sorts by the number), the name kept short
+        std::snprintf(fn, sizeof fn, "%03d_%.40s.wtl", idx, j.name.c_str());
         for (char* c = fn; *c; ++c)  // FAT-safe
             if (std::strchr("\\/:*?\"<>|", *c))
                 *c = '_';

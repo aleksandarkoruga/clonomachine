@@ -59,9 +59,10 @@ struct wtl_head {
 #define WTL_MAGIC 0x54575953u /* "SYWT" */
 
 struct wt_entry {
-    char file[48];
+    char file[96];
     char name[28];
-    uint16_t frames;
+    uint16_t frames;           /* known once loaded (the header is read then); 0xFFFF: not a table */
+    int num;                   /* the number before the name: the order */
 };
 static struct wt_entry g_cat[WT_CAT];
 static int g_ncat;
@@ -112,7 +113,8 @@ static void load_builtins(void) {
     }
 }
 
-/* the catalog: every table file's name and frames, in name order (= the table index) */
+/* the catalog: the table files in the order of their numbers (= the table index), names from the
+   file names; a header is read when its table loads (boot stays quick with many files) */
 static void scan_tables(void) {
     g_ncat = 0;
     if (!samples_card_ok())
@@ -128,40 +130,29 @@ static void scan_tables(void) {
         const char* e = fi.fname + L - 4;
         if (e[0] != '.' || (e[1] | 32) != 'w' || (e[2] | 32) != 't' || (e[3] | 32) != 'l')
             continue;
-        strcpy(g_cat[g_ncat++].file, fi.fname);
+        struct wt_entry* c = &g_cat[g_ncat++];
+        strcpy(c->file, fi.fname);
+        c->num = atoi(fi.fname);
+        const char* nm = fi.fname;
+        while (*nm >= '0' && *nm <= '9')
+            ++nm;
+        if (*nm == '_')
+            ++nm;
+        size_t k = 0;
+        for (; nm[k] && nm + k < e && k + 1 < sizeof(c->name); ++k)
+            c->name[k] = nm[k];
+        c->name[k] = 0;
+        c->frames = 0;
     }
     f_closedir(&dj);
-    for (int i = 1; i < g_ncat; ++i) /* insertion sort by name */
-        for (int j = i; j > 0 && strcmp(g_cat[j - 1].file, g_cat[j].file) > 0; --j) {
+    for (int i = 1; i < g_ncat; ++i) /* by number, then name (insertion sort) */
+        for (int j = i; j > 0 && (g_cat[j - 1].num > g_cat[j].num ||
+                                  (g_cat[j - 1].num == g_cat[j].num && strcmp(g_cat[j - 1].file, g_cat[j].file) > 0));
+             --j) {
             struct wt_entry t = g_cat[j];
             g_cat[j] = g_cat[j - 1];
             g_cat[j - 1] = t;
         }
-    int n = 0;
-    for (int i = 0; i < g_ncat; ++i) { /* headers: frames and name; bad files drop out */
-        char p[96];
-        snprintf(p, sizeof(p), WT_DIR "/%s", g_cat[i].file);
-        FIL f;
-        struct wtl_head h;
-        UINT got = 0;
-        int ok = f_open(&f, p, FA_READ) == FR_OK;
-        if (ok) {
-            ok = f_read(&f, &h, sizeof(h), &got) == FR_OK && got == sizeof(h) && h.magic == WTL_MAGIC &&
-                 h.version == 1 && h.frames >= 1 && h.frames <= 256 && h.words == wt_words((int)h.frames);
-            f_close(&f);
-        }
-        if (!ok) {
-            printf("synth: %s: not a table file\n", p);
-            continue;
-        }
-        g_cat[n] = g_cat[i];
-        h.name[sizeof(h.name) - 1] = 0;
-        strncpy(g_cat[n].name, h.name, sizeof(g_cat[n].name) - 1);
-        g_cat[n].name[sizeof(g_cat[n].name) - 1] = 0;
-        g_cat[n].frames = (uint16_t)h.frames;
-        ++n;
-    }
-    g_ncat = n;
 }
 
 static int resident(int entry) {
@@ -197,15 +188,26 @@ static void table_request(int o) {
 }
 
 static void load_start(int entry, int region) {
-    char p[96];
+    char p[128];
     snprintf(p, sizeof(p), WT_DIR "/%s", g_cat[entry].file);
-    if (f_open(&g_ld.f, p, FA_READ) != FR_OK || f_lseek(&g_ld.f, sizeof(struct wtl_head)) != FR_OK)
+    struct wtl_head h;
+    UINT got = 0;
+    if (f_open(&g_ld.f, p, FA_READ) != FR_OK)
         return;
+    if (f_read(&g_ld.f, &h, sizeof(h), &got) != FR_OK || got != sizeof(h) || h.magic != WTL_MAGIC || h.version != 1 ||
+        h.frames < 1 || h.frames > 256 || h.words != wt_words((int)h.frames)) {
+        f_close(&g_ld.f);
+        printf("synth: %s: not a table file\n", p);
+        g_cat[entry].frames = 0xFFFF;
+        return;
+    }
+    g_cat[entry].frames = (uint16_t)h.frames;
     g_reg[region].entry = -1; /* being overwritten */
     struct sy_table* T = &g_reg[region].T;
     memset(T, 0, sizeof(*T));
-    strncpy(T->name, g_cat[entry].name, sizeof(T->name) - 1);
-    T->frames = g_cat[entry].frames;
+    h.name[sizeof(h.name) - 1] = 0;
+    strncpy(T->name, h.name, sizeof(T->name) - 1);
+    T->frames = (uint16_t)h.frames;
     wt_layout(WT_BASE + (uint32_t)region * WT_REGION_WORDS, T->frames, T->lvl);
     g_ld.active = 1;
     g_ld.region = region;
@@ -238,12 +240,12 @@ static void tables_service(void) {
         int entry = -1;
         for (int k = 0; k < 2 && entry < 0; ++k) { /* the wanted ones: the knob last moved first */
             const int o = k ? !g_last_osc : g_last_osc;
-            if (g_want[o] >= 0 && resident(g_want[o]) < 0)
+            if (g_want[o] >= 0 && resident(g_want[o]) < 0 && g_cat[g_want[o]].frames != 0xFFFF)
                 entry = g_want[o];
         }
         if (entry < 0) { /* both in: the next one in the direction the knob last moved */
             const int n = g_want[g_last_osc] + g_dir[g_last_osc];
-            if (g_want[g_last_osc] >= 0 && n >= 0 && n < g_ncat && resident(n) < 0)
+            if (g_want[g_last_osc] >= 0 && n >= 0 && n < g_ncat && resident(n) < 0 && g_cat[n].frames != 0xFFFF)
                 entry = n;
         }
         const int r = entry >= 0 ? pick_region() : -1;
@@ -308,6 +310,32 @@ static void set_knob(int p, int32_t k) {
     after_param(p);
 }
 
+/* a table's index by name (the card's catalog, or the built-ins), else fallback */
+static int table_named(const char* name, int fallback) {
+    if (g_builtin) {
+        for (int i = 0; i < g_nbi; ++i)
+            if (!strcmp(g_bi[i].name, name))
+                return i;
+    } else {
+        for (int i = 0; i < g_ncat; ++i)
+            if (!strcmp(g_cat[i].name, name))
+                return i;
+    }
+    return fallback;
+}
+
+/* the power-up patch: the reese (fw/synth_ctl.c), A on the saw, B on the reese table if the card
+   has it */
+static void patch_reese(void) {
+    sy_patch_reese(&g_sy);
+    const int saw = table_named("saw", 0);
+    sy_set_natural(&g_sy, SP_A_TABLE, saw << 16);
+    sy_set_natural(&g_sy, SP_B_TABLE, table_named("reese_techstep", saw) << 16);
+    after_param(SP_A_TABLE);
+    after_param(SP_B_TABLE);
+    after_param(SP_FXSEND);
+}
+
 void synth_init(void) {
     const uint32_t t0 = eng_status(SMP_SG_SAMPLES);
     scales_init();
@@ -332,8 +360,7 @@ void synth_init(void) {
     apply_send();
     g_tick_at = eng_status(SMP_SG_SAMPLES);
     g_on = 1;
-    for (int o = 0; o < 2; ++o) /* the default patch's tables, the first now */
-        table_request(o);
+    patch_reese(); /* the power-up sound; its tables are requested, the first loads now */
     while (g_ncat && resident(g_want[0]) < 0) {
         const uint32_t before = g_ld.done;
         tables_service();
@@ -454,8 +481,8 @@ static void status(void) {
 void synth_console(int argc, char** argv) {
     if (argc < 2) {
         status();
-        puts("synth tables | params | scales | note <n> [vel] | deg <d> [vel] | off | <param> <value> | "
-             "reg <hex> <hex>");
+        puts("synth tables | params | scales | note <n> [vel] | deg <d> [vel] | off | reese (the power-up patch) | "
+             "<param> <value> | reg <hex> <hex>");
         return;
     }
     const char* c = argv[1];
@@ -465,8 +492,15 @@ void synth_console(int argc, char** argv) {
                 printf("  %3d %-28s %3u frames (built in)\n", i, g_bi[i].name, g_bi[i].frames);
         for (int i = 0; i < g_ncat; ++i) {
             const int r = resident(i);
-            printf("  %3d %-28s %3u frames%s%s%s\n", i, g_cat[i].name, g_cat[i].frames,
-                   r >= 0 ? "  in memory" : "", (g_want[0] == i) ? "  A" : "", (g_want[1] == i) ? "  B" : "");
+            char fr[16];
+            if (g_cat[i].frames == 0xFFFF)
+                snprintf(fr, sizeof(fr), "not a table");
+            else if (g_cat[i].frames)
+                snprintf(fr, sizeof(fr), "%3u frames", g_cat[i].frames);
+            else
+                fr[0] = 0;
+            printf("  %3d %-28s %-11s%s%s%s\n", i, g_cat[i].name, fr, r >= 0 ? "  in memory" : "",
+                   (g_want[0] == i) ? "  A" : "", (g_want[1] == i) ? "  B" : "");
         }
         printf("  %lu loads, the last %lu ms\n", (unsigned long)g_loads, (unsigned long)g_load_ms);
     } else if (!strcmp(c, "params")) {
@@ -487,6 +521,10 @@ void synth_console(int argc, char** argv) {
         sy_note_on(&g_sy, atoi(argv[2]), argc > 3 ? atoi(argv[3]) : 100, 0);
     } else if (!strcmp(c, "deg") && argc > 2) {
         sy_note_on(&g_sy, 64 + atoi(argv[2]), argc > 3 ? atoi(argv[3]) : 100, 1);
+    } else if (!strcmp(c, "reese")) { /* the power-up patch again */
+        sy_all_off(&g_sy);
+        patch_reese();
+        puts("  the reese patch");
     } else if (!strcmp(c, "off")) {
         sy_all_off(&g_sy);
     } else if (!strcmp(c, "reg") && argc > 3) {

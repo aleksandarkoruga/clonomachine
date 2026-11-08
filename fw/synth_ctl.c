@@ -440,6 +440,38 @@ void sy_all_off(struct sy_state* s) {
     }
 }
 void sy_bend(struct sy_state* s, int v14) { s->bend = clampi(v14, 0, 16383) - 8192; }
+void sy_patch_reese(struct sy_state* s) {
+#define V(x) ((int32_t)((x) * 65536.0))
+    static const struct {
+        uint8_t p;
+        int32_t v;
+    } k[] = {
+        /* mono, legato, a short glide */
+        {SP_MONO, V(1)}, {SP_LEGATO, V(1)}, {SP_PORTA, V(0.04)}, {SP_VOLUME, V(0.35)},
+        /* A: four saws detuned about +-1/4 semitone, free running (the beating) */
+        {SP_A_UNISON, V(4)}, {SP_A_DETUNE, V(0.35)}, {SP_A_BLEND, V(0.6)}, {SP_A_LEVEL, V(0.6)}, {SP_A_RAND, V(1)},
+        /* B: a table a little sharp, two voices, drifting through its frames (LFO 2) */
+        {SP_B_ON, V(1)}, {SP_B_LEVEL, V(0.45)}, {SP_B_FINE, V(7)}, {SP_B_POS, V(0.3)}, {SP_B_SMOOTH, V(1)},
+        {SP_B_UNISON, V(2)}, {SP_B_DETUNE, V(0.2)}, {SP_B_RAND, V(1)},
+        /* a sine an octave down */
+        {SP_SUB_ON, V(1)}, {SP_SUB_LEVEL, V(0.4)}, {SP_SUB_OCT, V(-1)},
+        /* a Moog low-pass with a little drive, key tracked */
+        {SP_SLOT1, V(1)}, {SP_CUTOFF, V(750)}, {SP_RES, V(1.2)}, {SP_DRIVE, V(0.2)}, {SP_FILTKEY, V(0.3)},
+        /* envelopes: amplitude, and a bite on the cutoff */
+        {SP_ENV1A, V(0.004)}, {SP_ENV1R, V(0.18)},
+        {SP_ENV2A, V(0.005)}, {SP_ENV2D, V(0.4)}, {SP_ENV2S, V(0.3)}, {SP_ENV2R, V(0.3)},
+        {SP_MOD1SRC, V(SYS_ENV2)}, {SP_MOD1DST, V(19)}, {SP_MOD1AMT, V(0.12)},   /* env 2 -> cutoff */
+        {SP_LFO2RATE, V(0.2)}, {SP_LFO2MODE, V(2)},
+        {SP_MOD3SRC, V(SYS_LFO2)}, {SP_MOD3DST, V(12)}, {SP_MOD3AMT, V(0.25)},   /* lfo 2 -> bPos */
+        {SP_MOD4SRC, V(SYS_MODWHEEL)}, {SP_MOD4DST, V(19)}, {SP_MOD4AMT, V(0.4)}, /* the mod wheel opens it */
+        {SP_LFO1RATE, V(0.12)}, {SP_LFO1MODE, V(2)},
+        {SP_MOD5SRC, V(SYS_LFO1)}, {SP_MOD5DST, V(19)}, {SP_MOD5AMT, V(0.05)},   /* lfo 1: slow cutoff drift */
+    };
+#undef V
+    for (unsigned i = 0; i < sizeof(k) / sizeof(k[0]); ++i)
+        sy_set_natural(s, k[i].p, k[i].v);
+}
+
 int sy_active_voices(const struct sy_state* s) {
     int n = 0;
     for (int i = 0; i < SY_VOICES; ++i)

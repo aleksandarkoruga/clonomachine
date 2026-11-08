@@ -97,6 +97,9 @@ int sy_param_of(const char* name);                 /* -1 if unknown (case-insens
 const char* sy_param_name(int p);
 const char* sy_source_name(int src);
 int sy_active_voices(const struct sy_state* s);
+/* the patch at power-up: a reese bass (every parameter but the tables: A a saw stack, B a table
+   to drift through; fw/synth.c picks them by name) */
+void sy_patch_reese(struct sy_state* s);
 
 /* fw/synth_filt_ctl.c (AGPL: the coefficient formulas of the quad morph filter's models) */
 struct sy_fslot { int model, type; int32_t g_q24, res_q16, drive_q16; };

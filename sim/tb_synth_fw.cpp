@@ -395,6 +395,45 @@ int main(int argc, char** argv) {
         check(top->osc_cyc_max < 1024 && top->filt_cyc_max < 1024, "within the cycle budget");
     });
 
+    run("reese", [&] {  // the power-up patch: a bass line (legato, glide), level without clipping
+        sy_patch_reese(&s);
+        set(s, "aTable", 1);  // saw
+        set(s, "bTable", 0);  // basic (the card's reese table isn't in the simulation)
+        if (const char* e = std::getenv("REESE_SET")) {  // debugging: name=value,name=value
+            std::string all = e;
+            for (size_t p0 = 0; p0 < all.size();) {
+                size_t c = all.find(',', p0);
+                if (c == std::string::npos) c = all.size();
+                const std::string kv = all.substr(p0, c - p0);
+                const size_t eq = kv.find('=');
+                if (eq != std::string::npos)
+                    set(s, kv.substr(0, eq).c_str(), std::atof(kv.c_str() + eq + 1));
+                p0 = c + 1;
+            }
+        }
+        const size_t a = out.size();
+        const int line[] = {40, 40, 43, 38, 40, 47, 45, 40};
+        for (int i = 0; i < 8; ++i) {
+            sy_note_on(&s, line[i], 110, 0);
+            samples(s, 9000);
+            if (i == 3 || i == 7) {  // a gap: a new attack
+                sy_note_off(&s, line[i], 0);
+                samples(s, 3000);
+            } else
+                sy_note_off(&s, line[i], 0), samples(s, 0);
+        }
+        samples(s, 12000);
+        save("reese", a);
+        double peak = 0;
+        for (size_t i = a; i < out.size(); ++i)
+            peak = std::max(peak, double(std::fabs(out[i])));
+        const double r = rms(out, a, out.size() - a - 12000), hf = hf_ratio(out, a + 2000, 16384, 3000);
+        std::printf("  rms %.3f, peak %.3f, energy above 3 kHz %.4f, voices active %d -> build/synth/fw_reese.wav\n",
+                    r, peak, hf, sy_active_voices(&s));
+        check(r > 0.05 && peak < 0.98, "reese: loud enough, no clipping");
+        check(hf < 0.05, "reese: low-passed (a bass)");
+    });
+
     std::printf(fails ? "%d FAILED\n" : "ALL PASS\n", fails);
     delete top;
     return fails ? 1 : 0;

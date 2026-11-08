@@ -5,7 +5,7 @@
 # (the synth's aTable / bTable, the first 128); the board loads a table when it is selected.
 #
 #   host/prepare_wt.sh /run/media/$USER/FPGA                       # the built-ins only
-#   host/prepare_wt.sh /run/media/$USER/FPGA ~/wavetables/*.wav    # + these
+#   host/prepare_wt.sh /run/media/$USER/FPGA ~/wavetables/*.wav    # + these (NNN_name.wtl)
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="$ROOT/build/host"
