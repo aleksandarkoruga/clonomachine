@@ -2,7 +2,7 @@
 # Wavetables for the synth onto a card (host/prepare_wt.cpp): builds the tool when its sources
 # changed, then writes the built-in tables and the given wavetable WAVs (files or folders) as
 # <card>/wavetables/NN_<name>.wtl, replacing the .wtl files there. NN is the table's index
-# (the synth's aTable / bTable); the board loads them in that order until its 8 MB are full.
+# (the synth's aTable / bTable, the first 128); the board loads a table when it is selected.
 #
 #   host/prepare_wt.sh /run/media/$USER/FPGA                       # the built-ins only
 #   host/prepare_wt.sh /run/media/$USER/FPGA ~/wavetables/*.wav    # + these

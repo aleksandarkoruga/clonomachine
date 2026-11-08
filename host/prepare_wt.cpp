@@ -1,13 +1,14 @@
 // Wavetables for the synth, prepared on the PC: WAV wavetables (frames from the 'clm ' chunk, else
 // 2048 samples) and the built-in shapes become the band-limited mip levels the oscillators play
 // (model/wt_tables.cpp: levels 1..9, 1024 / 512 / 256 samples per frame, s16, normalised), one
-// .wtl file each. The board copies them into the top 8 MB of its SDRAM in name order (fw/synth.c);
-// the file's number is the table index (aTable / bTable).
+// .wtl file each. The board indexes them in name order (the first 128: the file's number is the
+// table index, aTable / bTable) and loads each into its SDRAM when an oscillator selects it
+// (fw/synth.c); the card holds as many as you like.
 //
 //   build/host/prepare_wt [--out DIR] [--builtins] [--clean] [inputs...]    (host/prepare_wt.sh)
 //
 // inputs: WAV files or folders (their *.wav, sorted). Frames of another size are resampled to 2048;
-// more than 256 frames: 256 of them, evenly spaced. Stops at the 8 MB the board has for tables.
+// more than 256 frames: 256 of them, evenly spaced.
 //
 // .wtl: "SYWT", u32 version (1), u32 frames, u32 words (frames x 3328), char name[32], then the s16
 // words: level 1 (all frames), level 2, ... level 9.
@@ -27,7 +28,8 @@ namespace fs = std::filesystem;
 
 namespace {
 constexpr int kN0 = 2048, kMaxFrames = 256;
-constexpr uint32_t kFrameWords = 3328, kBudgetWords = (8u << 20) / 2;
+constexpr uint32_t kFrameWords = 3328;
+constexpr int kBoardIndexes = 128;  // the board's catalogue (fw/synth.c WT_CAT)
 
 // one frame of n samples -> 2048 (spectrum zero-padded or truncated)
 std::vector<float> resample_frame(const float* x, int n) {
@@ -171,13 +173,9 @@ int main(int argc, char** argv) {
     }
     uint32_t used = 0;
     int idx = 0, written = 0;
+    FILE* index = std::fopen((out / "index.txt").c_str(), "w");  // the numbers to look up (the board ignores it)
     for (auto& j : jobs) {
         const uint32_t w = uint32_t(j.t.frames) * kFrameWords;
-        if (used + w > kBudgetWords) {
-            std::printf("%-32s %3d frames: no room left in the 8 MB (%u KB used), skipped\n", j.name.c_str(),
-                        j.t.frames, used / 512);
-            continue;
-        }
         char fn[96];
         std::snprintf(fn, sizeof fn, "%02d_%s.wtl", idx, j.name.c_str());
         for (char* c = fn; *c; ++c)  // FAT-safe
@@ -188,10 +186,15 @@ int main(int argc, char** argv) {
             return 1;
         }
         std::printf("%2d %-32s %3d frames %5u KB\n", idx, j.name.c_str(), j.t.frames, w / 512);
+        if (index)
+            std::fprintf(index, "%3d  %-36s %3d frames\n", idx, j.name.c_str(), j.t.frames);
         used += w;
         ++idx;
         ++written;
     }
-    std::printf("%d tables, %u KB of 8192\n", written, used / 512);
+    if (index)
+        std::fclose(index);
+    std::printf("%d tables, %u KB on the card%s\n", written, used / 512,
+                written > kBoardIndexes ? " (the board indexes the first 128)" : "");
     return 0;
 }
